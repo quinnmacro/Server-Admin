@@ -1,6 +1,7 @@
 #!/bin/bash
-# 日志监控脚本 v1.1
+# 日志监控脚本 v1.2
 # 用法: log-monitor.sh [-q]  (-q 静默模式)
+# 说明: 每5分钟运行，仅检查Fail2ban封禁和容器异常，SSH登录汇总改为每日推送
 
 # 加载配置
 source /etc/monitoring/config.conf 2>/dev/null
@@ -142,14 +143,14 @@ $recently_exited
 # 主函数
 main() {
     log "========== 日志监控开始 =========="
-    
-    check_ssh_logins
+
+    # SSH登录通知已移至每日汇总
     check_fail2ban
     check_system_errors
     check_docker_containers
-    
+
     update_last_check
-    
+
     log "========== 日志监控完成 =========="
 }
 
