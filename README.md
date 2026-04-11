@@ -1,6 +1,6 @@
 # Server-Admin
 
-> 服务器运维管理中心  
+> 服务器运维管理中心
 > 最后更新：2026-04-11
 
 ---
@@ -22,94 +22,127 @@
 
 ```
 Server-Admin/
-├── README.md              # 本文档
-├── docs/                  # 详细文档
-│   ├── SETUP.md           # 初始化配置
-│   ├── MONITORING.md      # 监控系统
-│   ├── BACKUP.md          # 备份恢复
-│   ├── DEPLOY.md          # 部署流程
-│   ├── SECURITY.md        # 安全配置
-│   └── SERVICES.md        # 服务列表
-├── scripts/               # 运维脚本
-│   ├── health-check.sh    # 健康检查
-│   ├── backup.sh          # 备份脚本
-│   ├── log-monitor.sh     # 日志监控
-│   ├── deploy.sh          # 部署脚本
-│   └── docker-manage.sh   # Docker管理
-├── changelogs/            # 变更日志
-│   └── 2026-04.md         # 按月归档
-├── incidents/             # 故障记录
-│   └── YYYY-MM-DD-title.md
-└── adr/                   # 架构决策记录
-    └── NNN-title.md
+├── README.md                   # 本文档
+├── docs/                       # 详细文档
+│   ├── SETUP.md               # 初始化配置
+│   ├── MONITORING.md          # 监控系统
+│   ├── BACKUP.md              # 备份恢复
+│   ├── DEPLOY.md              # 部署流程
+│   ├── SECURITY.md            # 安全配置
+│   ├── SERVICES.md            # 服务列表
+│   └── OPTIMIZATION.md        # 性能优化
+├── scripts/                    # 运维脚本
+│   ├── health-check.sh        # 健康检查 v2.1
+│   ├── backup.sh              # 加密备份
+│   ├── log-monitor.sh         # 日志监控 v1.2
+│   ├── ssh-daily-report.sh    # SSH日报
+│   ├── telegram-notify.sh     # Telegram通知
+│   ├── deploy.sh              # 部署脚本
+│   └── docker-manage.sh       # Docker管理
+├── changelogs/                 # 变更日志
+│   └── 2026-04.md             # 按月归档
+├── incidents/                  # 故障记录
+│   └── TEMPLATE.md            # 故障记录模板
+└── adr/                        # 架构决策记录
+    ├── 001-monitoring-stack.md    # 监控方案选择
+    └── 002-performance-optimization.md  # 性能优化方案
 ```
 
 ---
 
-## 🚀 快速连接
+## 🚀 快速命令
 
 ```bash
 # SSH 连接
 ssh tokyo
 
-# 查看状态
-health-check
+# 健康检查
+health-check                    # 完整输出
+health-check -q                 # 静默模式
 
-# 查看容器
-docker-manage status
+# Docker 管理
+docker-manage status            # 查看状态
+docker-manage logs sanctionlist # 查看日志
+docker-manage restart homepage  # 重启服务
 
 # 部署
-deploy SanctionList
+deploy SanctionList             # 部署项目
+deploy --all                    # 部署全部
 
 # 备份
-backup
+backup                          # 执行备份
+backup -q                       # 静默模式
+
+# 测试通知
+telegram-notify --test "测试消息"
 ```
 
 ---
 
 ## 📊 运行的服务
 
-| 服务 | 端口 | 状态 |
-|------|------|------|
-| SanctionList Frontend | 32001 | ✅ |
-| SanctionList Backend | 32002 | ✅ |
-| Homepage | 3000 | ✅ |
-| X-UI | 自动 | ✅ |
-| Tailscale VPN | 41641 | ✅ |
-| Cloudflare Tunnel | - | ✅ |
+| 服务 | 端口 | 内存限制 | 状态 |
+|------|------|----------|------|
+| SanctionList Backend | 32002 | 256MB | ✅ |
+| SanctionList Frontend | 32001 | 64MB | ✅ |
+| Homepage | 3000 | 64MB | ✅ |
+| X-UI | 自动 | - | ✅ |
+| Tailscale VPN | 41641 | - | ✅ |
+| Cloudflare Tunnel | - | - | ✅ |
 
 ---
 
 ## 📅 定时任务
 
-| 时间 | 任务 |
-|------|------|
-| 每 5 分钟 | 日志监控 |
-| 每小时 | 健康检查 |
-| 每天 2:00 | 自动备份 |
-| 每天 8:00 | 完整检查 |
+| 时间 | 任务 | 说明 |
+|------|------|------|
+| */5 * * * * | log-monitor.sh | Fail2ban/容器异常监控 |
+| 0 * * * * | health-check.sh -q | 每小时健康检查 |
+| 0 2 * * * | backup.sh -q | 每日备份 |
+| 0 8 * * * | health-check.sh | 完整健康检查 |
+| 30 8 * * * | ssh-daily-report.sh | SSH登录日报 |
+| 0 3 * * * | 日志清理 | 保留7天 |
+| 0 4 * * 0 | 备份清理 | 保留4周 |
 
 ---
 
 ## 🔔 告警通知
 
 所有告警通过 Telegram 发送：
-- 健康检查异常
-- 安全事件（SSH、Fail2ban）
-- 容器异常
-- 部署结果
+
+| 类型 | 触发条件 |
+|------|----------|
+| 🚨 系统告警 | 内存>90%、磁盘>80%、负载>150% |
+| 🚨 服务告警 | 容器停止、服务异常 |
+| 🚨 安全告警 | OOM事件、可疑端口 |
+| 🔐 Fail2ban | IP封禁 |
+| 📊 SSH日报 | 每日登录统计 |
+| ✅ 部署通知 | 部署成功/失败 |
 
 ---
 
-## 📚 文档
+## 📚 文档索引
 
-- [初始化配置](./docs/SETUP.md)
-- [监控系统](./docs/MONITORING.md)
-- [备份恢复](./docs/BACKUP.md)
-- [部署流程](./docs/DEPLOY.md)
-- [安全配置](./docs/SECURITY.md)
-- [服务列表](./docs/SERVICES.md)
-- [变更日志](./changelogs/2026-04.md)
+### 基础配置
+- [初始化配置](./docs/SETUP.md) - 服务器初始化步骤
+- [服务列表](./docs/SERVICES.md) - 所有服务详情
+
+### 运维管理
+- [监控系统](./docs/MONITORING.md) - 健康检查与告警
+- [备份恢复](./docs/BACKUP.md) - 备份策略与恢复
+- [部署流程](./docs/DEPLOY.md) - 自动化部署
+- [性能优化](./docs/OPTIMIZATION.md) - 内核与容器优化
+
+### 安全
+- [安全配置](./docs/SECURITY.md) - 防火墙、SSH、Fail2ban
+
+### 记录
+- [变更日志](./changelogs/2026-04.md) - 按月归档
+- [故障记录模板](./incidents/TEMPLATE.md) - 故障记录格式
+
+### 架构决策
+- [ADR-001](./adr/001-monitoring-stack.md) - 监控方案选择
+- [ADR-002](./adr/002-performance-optimization.md) - 性能优化方案
 
 ---
 
@@ -117,9 +150,20 @@ backup
 
 | 日期 | 操作 | 记录人 |
 |------|------|--------|
-| 2026-04-11 | 初始化监控系统、备份系统 | Claude |
-| 2026-04-11 | 添加日志聚合、自动化部署 | Claude |
+| 2026-04-10 | 服务器初始化、部署服务 | Claude |
+| 2026-04-11 | 监控系统、备份系统、安全加固 | Claude |
+| 2026-04-11 | 日志聚合、自动化部署、容器管理 | Claude |
+| 2026-04-11 | 性能优化（内核调优、资源限制） | Claude |
+| 2026-04-11 | SSH通知改为每日汇总 | Claude |
 
 ---
 
-*此仓库与服务器 `/usr/local/share/doc/monitoring/` 同步*
+## 🔗 相关链接
+
+- [GitHub 仓库](https://github.com/quinnmacro/Server-Admin)
+- [SanctionList 项目](https://github.com/quinnmacro/SanctionList)
+- [Vultr 控制台](https://my.vultr.com/)
+
+---
+
+*此仓库与服务器脚本同步，服务器配置文件位于 `/etc/monitoring/`*
