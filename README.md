@@ -37,8 +37,10 @@ Server-Admin/
 │   ├── log-monitor.sh         # 日志监控 v1.2
 │   ├── ssh-daily-report.sh    # SSH日报
 │   ├── telegram-notify.sh     # Telegram通知
+│   ├── telegram-bot.py        # 交互式机器人
 │   ├── deploy.sh              # 部署脚本
-│   └── docker-manage.sh       # Docker管理
+│   ├── docker-manage.sh       # Docker管理
+│   └── sync-docs.sh           # 文档同步
 ├── changelogs/                 # 变更日志
 │   └── 2026-04.md             # 按月归档
 ├── incidents/                  # 故障记录

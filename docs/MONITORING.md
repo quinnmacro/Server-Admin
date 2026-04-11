@@ -91,9 +91,30 @@
 
 ---
 
-## 三、Telegram 通知
+## 三、Telegram 机器人
 
-### 3.1 配置
+### 3.1 功能概述
+
+Server-Admin 提供交互式 Telegram 机器人，支持：
+
+- 命令菜单查询服务器状态
+- 交互按钮快捷操作
+- 远程重启容器
+- 手动触发备份
+
+### 3.2 可用命令
+
+| 命令 | 功能 | 说明 |
+|------|------|------|
+| `/start` | 主菜单 | 显示交互按钮 |
+| `/status` | 服务器状态 | 内存、磁盘、负载、容器 |
+| `/services` | 服务列表 | 系统服务和容器状态 |
+| `/logs` | 查看日志 | 多种日志选择 |
+| `/backup` | 手动备份 | 触发备份任务 |
+| `/restart` | 重启容器 | 选择容器重启 |
+| `/help` | 帮助信息 | 命令说明 |
+
+### 3.3 配置
 
 **位置**: `/etc/monitoring/config.conf`
 
@@ -103,20 +124,40 @@ TELEGRAM_CHAT_ID="your_chat_id"
 TELEGRAM_ENABLED=true
 ```
 
-### 3.2 通知类型
-
-| 类型 | 图标 | 触发条件 |
-|------|------|----------|
-| 告警 | 🚨 | 系统异常 |
-| 警告 | ⚠️ | 需要关注 |
-| 信息 | ℹ️ | 常规通知 |
-| 安全 | 🔐 | SSH登录 |
-| 封禁 | 🚨 | Fail2ban |
-
-### 3.3 测试通知
+### 3.4 服务管理
 
 ```bash
-/usr/local/sbin/monitoring/telegram-notify.sh --test "测试通知"
+# 启动机器人
+systemctl start telegram-bot
+
+# 停止机器人
+systemctl stop telegram-bot
+
+# 查看状态
+systemctl status telegram-bot
+
+# 查看日志
+tail -f /var/log/monitoring/telegram-bot.log
+```
+
+### 3.5 设置命令菜单
+
+在 Telegram 中向 @BotFather 发送：
+
+```
+/setcommands
+```
+
+然后选择你的机器人，发送：
+
+```
+start - 显示主菜单
+status - 服务器状态
+services - 服务列表
+logs - 查看日志
+backup - 手动备份
+restart - 重启容器
+help - 帮助信息
 ```
 
 ---
