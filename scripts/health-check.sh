@@ -329,6 +329,51 @@ check_sqlite() {
     fi
 }
 
+# ==================== OOM 检查 ====================
+
+# 检查 OOM 事件
+check_oom() {
+    local oom_count=$(dmesg 2>/dev/null | grep -ci "out of memory" 2>/dev/null)
+    oom_count=${oom_count:-0}
+    if [ "$oom_count" -gt 0 ]; then
+        alert "检测到 ${oom_count} 次 OOM 事件"
+        dmesg 2>/dev/null | grep -i "out of memory" | tail -3 | while read line; do
+            log "OOM详情: $line"
+        done
+    else
+        log "OOM检查 - 无内存溢出事件"
+    fi
+}
+
+# 检查 TCP 连接状态
+check_tcp_states() {
+    local time_wait=$(ss -tan 2>/dev/null | grep -c "TIME-WAIT" 2>/dev/null)
+    time_wait=${time_wait:-0}
+    local close_wait=$(ss -tan 2>/dev/null | grep -c "CLOSE-WAIT" 2>/dev/null)
+    close_wait=${close_wait:-0}
+
+    if [ "$close_wait" -gt 50 ]; then
+        alert "TCP CLOSE-WAIT 连接过多: ${close_wait} 个"
+    fi
+    log "TCP状态: TIME_WAIT=${time_wait}, CLOSE_WAIT=${close_wait}"
+}
+
+# 检查容器内存使用率
+check_docker_memory() {
+    local containers="homepage sanctionlist-backend-1 sanctionlist-frontend-1"
+    for container in $containers; do
+        local mem_percent=$(docker stats --no-stream --format "{{.MemPerc}}" "$container" 2>/dev/null | tr -d "%")
+        if [ -n "$mem_percent" ]; then
+            local mem_int=$(echo "$mem_percent" | awk '{printf "%.0f", $1}')
+            if [ "$mem_int" -gt 90 ]; then
+                alert "容器 $container 内存使用率 ${mem_int}%"
+            elif [ "$mem_int" -gt 80 ]; then
+                log "WARNING: 容器 $container 内存使用率 ${mem_int}%"
+            fi
+        fi
+    done
+}
+
 # ==================== 日志检查 ====================
 
 # 检查系统错误日志
@@ -359,6 +404,7 @@ main() {
     # === 网络状态 ===
     log "--- 网络状态 ---"
     check_connections
+    check_tcp_states
     check_dns
     check_outbound_connectivity
 
@@ -369,6 +415,10 @@ main() {
     check_fail2ban_status
     check_suspicious_ports
     check_zombie_processes
+
+    # === OOM 检查 ===
+    log "--- 内存溢出 ---"
+    check_oom
 
     # === VPN/隧道 ===
     log "--- VPN/隧道 ---"
@@ -386,6 +436,7 @@ main() {
     check_docker "sanctionlist-backend-1"
     check_docker "sanctionlist-frontend-1"
     check_docker_health
+    check_docker_memory
 
     # === 时间/证书 ===
     log "--- 时间/证书 ---"
