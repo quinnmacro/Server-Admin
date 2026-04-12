@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v2.0
-交互式服务器管理机器人 + AI 智能助手
+Server-Admin Telegram Bot v3.0
+交互式服务器管理机器人 + AI 智能助手 + SSH性能监控
 
 命令菜单:
-- /start  - 欢迎信息
+- /start  - 欢迎信息和主菜单
 - /status - 服务器状态
 - /services - 服务列表
 - /logs - 查看日志
@@ -13,9 +13,24 @@ Server-Admin Telegram Bot v2.0
 - /ai - AI 智能对话
 - /analyze - AI 分析服务器
 - /help - 帮助信息
+
+SSH性能命令:
+- /sshstatus - SSH服务状态和性能指标
+- /sshperformance - SSH性能测试报告
+- /sshoptimize - SSH性能优化建议
+- /sshdiagnose - SSH连接问题诊断
+- /sshhistory - SSH性能历史趋势
+- /sshconfig - SSH配置管理
+
+交互菜单:
+📊 系统监控 - 状态、服务、日志
+🔧 管理操作 - 备份、重启、SSH性能
+🤖 智能工具 - AI助手、系统诊断
+🎉 趣味功能 - 游戏、笑话、彩蛋
 """
 
 import os
+import sys
 import subprocess
 import logging
 import json
@@ -24,8 +39,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # 配置
-CONFIG_FILE = "/etc/monitoring/config.conf"
-LOG_FILE = "/var/log/monitoring/telegram-bot.log"
+CONFIG_FILE = "/Users/liulu/.monitoring/config.conf"
+# LOG_FILE 将在 load_config() 后根据环境确定
 
 # AI 配置
 AI_BASE_URL = "https://cloud.infini-ai.com/maas/coding"
@@ -34,18 +49,59 @@ AI_MODEL = "deepseek-v3.2"  # 可选: glm-5, deepseek-v3.2, kimi-k2.5, minimax-m
 # 从配置文件读取
 def load_config():
     config = {}
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            for line in f:
-                if '=' in line and not line.startswith('#'):
-                    key, value = line.strip().split('=', 1)
-                    config[key] = value.strip('"').strip("'")
+
+    # 可能的配置文件位置（按优先级）
+    config_files = [
+        "/Users/liulu/.monitoring/config.conf",  # 用户级配置（最高优先级）
+        "/etc/monitoring/config.conf",          # 系统级配置
+        "/root/.monitoring/config.conf",         # root用户配置
+    ]
+
+    for config_file in config_files:
+        if os.path.exists(config_file):
+            # 在日志配置之前，使用简单的print
+            print(f"[INFO] 加载配置文件: {config_file}", file=sys.stderr) if 'sys' in globals() else None
+            with open(config_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                        key, value = line.split('=', 1)
+                        config[key] = value.strip('"').strip("'")
+            # 找到第一个可用的配置文件就停止
+            break
+
+    if not config:
+        print(f"[WARNING] 未找到配置文件，使用默认配置", file=sys.stderr) if 'sys' in globals() else None
+
     return config
 
 CONFIG = load_config()
 TOKEN = CONFIG.get('TELEGRAM_BOT_TOKEN', '')
 ALLOWED_CHAT_ID = int(CONFIG.get('TELEGRAM_CHAT_ID', '0'))
 AI_API_KEY = CONFIG.get('INFINI_API_KEY', '')
+
+# 确定日志文件路径
+LOG_DIR = CONFIG.get('LOG_DIR', '')
+if LOG_DIR and os.path.exists(LOG_DIR):
+    # 使用配置中的LOG_DIR
+    LOG_FILE = os.path.join(LOG_DIR, 'telegram-bot.log')
+elif os.path.exists('/var/log/monitoring'):
+    # 服务器默认路径
+    LOG_FILE = '/var/log/monitoring/telegram-bot.log'
+elif os.path.exists('/Users/liulu/.monitoring'):
+    # 本地Mac路径
+    LOG_FILE = '/Users/liulu/.monitoring/telegram-bot.log'
+else:
+    # 最后回退到当前目录
+    LOG_FILE = 'telegram-bot.log'
+
+# 确保日志目录存在
+log_dir = os.path.dirname(LOG_FILE)
+if log_dir and not os.path.exists(log_dir):
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception as e:
+        print(f"[WARNING] 无法创建日志目录 {log_dir}: {e}", file=sys.stderr)
 
 # 日志配置
 logging.basicConfig(
@@ -78,7 +134,22 @@ def run_command(cmd: str, timeout: int = 30) -> str:
 def call_ai(prompt: str, system_prompt: str = None) -> str:
     """调用 Infini AI API"""
     if not AI_API_KEY:
-        return "⚠️ AI API Key 未配置，请在 /etc/monitoring/config.conf 中设置 INFINI_API_KEY"
+        # 检查实际加载的配置文件
+        config_locations = [
+            "/Users/liulu/.monitoring/config.conf",
+            "/etc/monitoring/config.conf",
+            "/root/.monitoring/config.conf"
+        ]
+        existing_config = None
+        for config_file in config_locations:
+            if os.path.exists(config_file):
+                existing_config = config_file
+                break
+
+        if existing_config:
+            return f"⚠️ AI API Key 未配置，请在 {existing_config} 中设置 INFINI_API_KEY\n\n示例配置:\nINFINI_API_KEY=\"your_api_key_here\"\n\n您可以从 https://cloud.infini-ai.com/ 获取API密钥"
+        else:
+            return "⚠️ AI API Key 未配置，请创建配置文件并设置 INFINI_API_KEY\n\n创建文件: /Users/liulu/.monitoring/config.conf\n添加内容:\nINFINI_API_KEY=\"your_api_key_here\"\n\n您可以从 https://cloud.infini-ai.com/ 获取API密钥"
 
     try:
         import urllib.request
@@ -149,7 +220,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
         [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
          InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
-         InlineKeyboardButton("❓ 帮助", callback_data="help")]
+         InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -161,6 +232,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 系统监控 - 状态、服务、日志
 🔧 管理操作 - 备份、重启、SSH性能
 🤖 智能工具 - AI助手、系统诊断
+🎉 趣味功能 - 游戏、笑话、彩蛋
 
 *主要命令*:
 /status - 系统状态
@@ -180,7 +252,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *快捷操作*:
 直接发送消息即可与 AI 对话
 点击按钮使用交互式菜单
-使用 /help 查看完整命令列表"""
+使用 /help 查看完整命令列表
+点击 🎉 趣味 按钮发现隐藏彩蛋"""
 
     await update.message.reply_text(welcome, parse_mode='Markdown', reply_markup=reply_markup)
     logger.info(f"Start command from {update.effective_chat.id}")
@@ -444,6 +517,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *快捷操作:*
 直接发送消息即可与 AI 对话
 点击按钮使用交互式菜单
+点击 🎉 趣味 按钮发现隐藏彩蛋功能
 
 *注意事项:*
 - 敏感操作需要二次确认
@@ -458,6 +532,70 @@ GitHub: github.com/quinnmacro/Server-Admin"""
         await update.message.reply_text(help_msg, parse_mode='Markdown')
     else:
         await update.callback_query.edit_message_text(help_msg, parse_mode='Markdown')
+
+# ==================== 彩蛋功能 ====================
+
+async def easteregg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """彩蛋命令 - 隐藏的趣味功能"""
+    if not authorized(update):
+        return
+
+    # 随机选择一种彩蛋类型
+    import random
+    egg_types = ["game", "joke", "poetry", "fortune", "meme", "ai"]
+    egg_type = random.choice(egg_types)
+
+    if egg_type == "game":
+        games = [
+            "🎮 *猜数字游戏*\n\n我正在想一个1-100之间的数字，猜猜看是多少？\n\n发送 `/guess 数字` 来猜测！",
+            "🎯 *服务器挑战*\n\n你能让服务器负载保持在1.0以下吗？\n使用 `/status` 查看当前负载！",
+            "🏆 *运维大师*\n\n连续7天每天运行健康检查，获得'运维大师'称号！"
+        ]
+        await update.message.reply_text(random.choice(games), parse_mode='Markdown')
+
+    elif egg_type == "joke":
+        jokes = [
+            "🤣 *程序员笑话*\n\n问：为什么程序员总是把万圣节和圣诞节搞混？\n答：因为 Oct 31 == Dec 25！",
+            "😄 *服务器笑话*\n\n问：服务器最害怕什么？\n答：404错误，因为它意味着'找不到页面'，但实际上是'找不到原因'！",
+            "🎯 *SSH笑话*\n\n问：SSH连接对女朋友说什么？\n答：'我需要你的公钥才能进入你的心里！'",
+            "🐛 *Bug笑话*\n\n问：为什么程序员不喜欢大自然？\n答：因为那里有太多的Bug！"
+        ]
+        await update.message.reply_text(random.choice(jokes), parse_mode='Markdown')
+
+    elif egg_type == "poetry":
+        poems = [
+            "🎭 *代码的诗篇*\n\n在数字的海洋里，\n我寻找着答案的光芒。\n\n每一行代码，\n都是一句诗句，\n在服务器的心跳中，\n找到技术的韵律。",
+            "🌌 *服务器的夜曲*\n\n当月光洒在数据中心，\n服务器轻声低语。\n\nCPU在思考，\n内存在回忆，\n硬盘在诉说，\n网络的秘密。",
+            "⚡ *SSH的连接*\n\n穿过千山万水的隧道，\n抵达服务器的怀抱。\n\n加密的握手，\n安全的通道，\n每一次连接，\n都是信任的拥抱。"
+        ]
+        await update.message.reply_text(random.choice(poems), parse_mode='Markdown')
+
+    elif egg_type == "fortune":
+        fortunes = [
+            "🥠 *幸运代码饼干*\n\n```\n┌────────────────────────┐\n│  你的代码今天会运行    │\n│      得特别流畅！      │\n└────────────────────────┘\n```",
+            "🔮 *技术预言*\n\n> 今天你会发现一个隐藏的Bug，\n> 但也会找到优雅的解决方案。\n\n💡 *提示*：查看日志获取线索。",
+            "🌟 *服务器星座*\n\n**运维座今日运势**：\n• 工作：适合优化配置\n• 爱情：与代码关系融洽\n• 健康：系统负载平稳\n• 财运：备份一切顺利",
+            "🎯 *今日任务*\n\n1. 对代码微笑一次\n2. 感谢服务器辛勤工作\n3. 备份重要数据\n4. 学习新技术"
+        ]
+        await update.message.reply_text(random.choice(fortunes), parse_mode='Markdown')
+
+    elif egg_type == "meme":
+        memes = [
+            "😎 *程序员专属表情包*\n\n```\n  ╔════════════════╗\n  ║  听说你在找Bug? ║\n  ╚════════════════╝\n          👉 👈\n        我在这呢！\n```",
+            "🚀 *服务器日常*\n\n```\n  [负载: 0.5] 我还能行！\n  [负载: 1.5] 有点压力...\n  [负载: 3.0] 我要重启了！\n```",
+            "🤖 *AI的内心独白*\n\n```\n人类：帮我优化服务器\nAI：正在思考...\nAI：建议重启\n人类：就这？\nAI：🤖💔\n```"
+        ]
+        await update.message.reply_text(random.choice(memes), parse_mode='Markdown')
+
+    elif egg_type == "ai":
+        ai_eggs = [
+            "🤖 *AI秘密*\n\n你知道吗？我其实每天都在学习\n如何更好地为你服务！\n\n💭 *内心想法*：希望人类多夸夸我~",
+            "🧠 *神经网络低语*\n\n我看到了...看到了...\n服务器的未来是光明的！\n\n（其实我只是个脚本）",
+            "🎭 *AI的戏剧*\n\n**第一幕**：接收命令\n**第二幕**：处理请求\n**第三幕**：返回结果\n\n*观众掌声* 👏👏👏"
+        ]
+        await update.message.reply_text(random.choice(ai_eggs), parse_mode='Markdown')
+
+    logger.info(f"Easter egg triggered: {egg_type}")
 
 # ==================== SSH性能功能 ====================
 
@@ -888,7 +1026,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "start":
-        # 重新显示主菜单
+        # 重新显示主菜单（完整欢迎消息）
         keyboard = [
             [InlineKeyboardButton("📊 系统状态", callback_data="status"),
              InlineKeyboardButton("🔧 服务管理", callback_data="services_menu"),
@@ -898,10 +1036,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
             [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
              InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
-             InlineKeyboardButton("❓ 帮助", callback_data="help")]
+             InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")]
         ]
+        welcome = """🤖 *Server-Admin Bot v3.0*
+
+欢迎使用服务器智能管理机器人！
+
+*功能分类*:
+📊 系统监控 - 状态、服务、日志
+🔧 管理操作 - 备份、重启、SSH性能
+🤖 智能工具 - AI助手、系统诊断
+🎉 趣味功能 - 游戏、笑话、彩蛋
+
+*主要命令*:
+/status - 系统状态
+/services - 服务列表
+/logs - 查看日志
+/backup - 手动备份
+/restart - 重启容器
+/ai - AI智能对话
+/analyze - AI系统分析
+
+*SSH性能监控*:
+/sshstatus - SSH服务状态
+/sshperformance - SSH性能测试
+/sshoptimize - SSH优化建议
+/sshdiagnose - SSH问题诊断
+
+*快捷操作*:
+直接发送消息即可与 AI 对话
+点击按钮使用交互式菜单
+使用 /help 查看完整命令列表
+点击 🎉 趣味 按钮发现隐藏彩蛋"""
         await query.edit_message_text(
-            "🤖 *Server-Admin Bot v3.0*\n\n选择操作：",
+            welcome,
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1019,6 +1187,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "restart_menu":
         await restart_menu(update, context)
+
+    elif data == "fun_menu":
+        # 显示趣味功能子菜单
+        fun_keyboard = [
+            [InlineKeyboardButton("❓ 帮助文档", callback_data="help"),
+             InlineKeyboardButton("🎮 趣味游戏", callback_data="egg_game")],
+            [InlineKeyboardButton("😄 程序笑话", callback_data="egg_joke"),
+             InlineKeyboardButton("🎭 技术诗歌", callback_data="egg_poetry")],
+            [InlineKeyboardButton("🥠 幸运饼干", callback_data="egg_fortune"),
+             InlineKeyboardButton("😎 表情包", callback_data="egg_meme")],
+            [InlineKeyboardButton("🤖 AI彩蛋", callback_data="egg_ai"),
+             InlineKeyboardButton("🔙 返回", callback_data="start")]
+        ]
+        await query.edit_message_text(
+            "🎉 *趣味功能*\n\n选择趣味功能:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(fun_keyboard)
+        )
 
     elif data == "help":
         await help_cmd(update, context)
@@ -1196,6 +1382,92 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logs_content = run_command("docker ps -a --format 'table {{.Names}}\\t{{.Status}}' 2>/dev/null")
         await query.edit_message_text(f"📋 *Docker状态*\n\n```\n{logs_content}\n```", parse_mode='Markdown')
 
+    # ==================== 彩蛋功能 ====================
+    elif data == "easter_egg":
+        # 隐藏的彩蛋功能
+        easter_egg_keyboard = [
+            [InlineKeyboardButton("🎮 游戏时间", callback_data="egg_game"),
+             InlineKeyboardButton("😄 笑话时间", callback_data="egg_joke")],
+            [InlineKeyboardButton("🎭 诗歌模式", callback_data="egg_poetry"),
+             InlineKeyboardButton("🥠 幸运饼干", callback_data="egg_fortune")],
+            [InlineKeyboardButton("😎 表情包模式", callback_data="egg_meme"),
+             InlineKeyboardButton("🤖 AI彩蛋", callback_data="egg_ai")],
+            [InlineKeyboardButton("🔙 返回", callback_data="start")]
+        ]
+        await query.edit_message_text(
+            "🥚 *发现隐藏彩蛋！*\n\n选择趣味功能:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(easter_egg_keyboard)
+        )
+
+    elif data == "egg_game":
+        # 简单的小游戏
+        games = [
+            "🎮 *猜数字游戏*\n\n我正在想一个1-100之间的数字，猜猜看是多少？\n\n发送 `/guess 数字` 来猜测！",
+            "🎯 *服务器挑战*\n\n你能让服务器负载保持在1.0以下吗？\n使用 `/status` 查看当前负载！",
+            "🏆 *运维大师*\n\n连续7天每天运行健康检查，获得'运维大师'称号！"
+        ]
+        import random
+        game_msg = random.choice(games)
+        await query.edit_message_text(game_msg, parse_mode='Markdown')
+
+    elif data == "egg_joke":
+        # 程序员笑话
+        jokes = [
+            "🤣 *程序员笑话*\n\n问：为什么程序员总是把万圣节和圣诞节搞混？\n答：因为 Oct 31 == Dec 25！",
+            "😄 *服务器笑话*\n\n问：服务器最害怕什么？\n答：404错误，因为它意味着'找不到页面'，但实际上是'找不到原因'！",
+            "🎯 *SSH笑话*\n\n问：SSH连接对女朋友说什么？\n答：'我需要你的公钥才能进入你的心里！'",
+            "🐛 *Bug笑话*\n\n问：为什么程序员不喜欢大自然？\n答：因为那里有太多的Bug！"
+        ]
+        import random
+        joke_msg = random.choice(jokes)
+        await query.edit_message_text(joke_msg, parse_mode='Markdown')
+
+    elif data == "egg_poetry":
+        # 诗歌模式
+        poems = [
+            "🎭 *代码的诗篇*\n\n在数字的海洋里，\n我寻找着答案的光芒。\n\n每一行代码，\n都是一句诗句，\n在服务器的心跳中，\n找到技术的韵律。",
+            "🌌 *服务器的夜曲*\n\n当月光洒在数据中心，\n服务器轻声低语。\n\nCPU在思考，\n内存在回忆，\n硬盘在诉说，\n网络的秘密。",
+            "⚡ *SSH的连接*\n\n穿过千山万水的隧道，\n抵达服务器的怀抱。\n\n加密的握手，\n安全的通道，\n每一次连接，\n都是信任的拥抱。"
+        ]
+        import random
+        poem_msg = random.choice(poems)
+        await query.edit_message_text(poem_msg, parse_mode='Markdown')
+
+    elif data == "egg_fortune":
+        # 幸运饼干
+        fortunes = [
+            "🥠 *幸运代码饼干*\n\n```\n┌────────────────────────┐\n│  你的代码今天会运行    │\n│      得特别流畅！      │\n└────────────────────────┘\n```",
+            "🔮 *技术预言*\n\n> 今天你会发现一个隐藏的Bug，\n> 但也会找到优雅的解决方案。\n\n💡 *提示*：查看日志获取线索。",
+            "🌟 *服务器星座*\n\n**运维座今日运势**：\n• 工作：适合优化配置\n• 爱情：与代码关系融洽\n• 健康：系统负载平稳\n• 财运：备份一切顺利",
+            "🎯 *今日任务*\n\n1. 对代码微笑一次\n2. 感谢服务器辛勤工作\n3. 备份重要数据\n4. 学习新技术"
+        ]
+        import random
+        fortune_msg = random.choice(fortunes)
+        await query.edit_message_text(fortune_msg, parse_mode='Markdown')
+
+    elif data == "egg_meme":
+        # 表情包模式
+        memes = [
+            "😎 *程序员专属表情包*\n\n```\n  ╔════════════════╗\n  ║  听说你在找Bug? ║\n  ╚════════════════╝\n          👉 👈\n        我在这呢！\n```",
+            "🚀 *服务器日常*\n\n```\n  [负载: 0.5] 我还能行！\n  [负载: 1.5] 有点压力...\n  [负载: 3.0] 我要重启了！\n```",
+            "🤖 *AI的内心独白*\n\n```\n人类：帮我优化服务器\nAI：正在思考...\nAI：建议重启\n人类：就这？\nAI：🤖💔\n```"
+        ]
+        import random
+        meme_msg = random.choice(memes)
+        await query.edit_message_text(meme_msg, parse_mode='Markdown')
+
+    elif data == "egg_ai":
+        # AI彩蛋
+        ai_eggs = [
+            "🤖 *AI秘密*\n\n你知道吗？我其实每天都在学习\n如何更好地为你服务！\n\n💭 *内心想法*：希望人类多夸夸我~",
+            "🧠 *神经网络低语*\n\n我看到了...看到了...\n服务器的未来是光明的！\n\n（其实我只是个脚本）",
+            "🎭 *AI的戏剧*\n\n**第一幕**：接收命令\n**第二幕**：处理请求\n**第三幕**：返回结果\n\n*观众掌声* 👏👏👏"
+        ]
+        import random
+        ai_msg = random.choice(ai_eggs)
+        await query.edit_message_text(ai_msg, parse_mode='Markdown')
+
 # ==================== 主函数 ====================
 
 def main():
@@ -1231,8 +1503,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v2.0 starting with AI support...")
-    print("Server-Admin Bot v2.0 已启动 (AI 增强版)")
+    logger.info("Bot v3.0 starting with AI and SSH performance support...")
+    print("Server-Admin Bot v3.0 已启动 (AI增强版 + SSH性能监控)")
 
     # 启动机器人 (使用 polling)
     application.run_polling(allowed_updates=Update.ALL_TYPES)

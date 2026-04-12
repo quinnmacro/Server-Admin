@@ -1,7 +1,7 @@
 # Server-Admin
 
-> 服务器运维管理中心
-> 最后更新：2026-04-11
+> 服务器运维管理中心 (AI增强版 + SSH性能监控)
+> 最后更新：2026-04-12
 
 ---
 
@@ -23,6 +23,8 @@
 ```
 Server-Admin/
 ├── README.md                   # 本文档
+├── CLAUDE.md                   # Claude 协作指南
+├── CHANGELOG.md                # 总变更日志
 ├── docs/                       # 详细文档
 │   ├── SETUP.md               # 初始化配置
 │   ├── MONITORING.md          # 监控系统
@@ -33,21 +35,27 @@ Server-Admin/
 │   └── OPTIMIZATION.md        # 性能优化
 ├── scripts/                    # 运维脚本
 │   ├── health-check.sh        # 健康检查 v2.1
-│   ├── backup.sh              # 加密备份
+│   ├── backup.sh              # 加密备份 v1.0
 │   ├── log-monitor.sh         # 日志监控 v1.2
 │   ├── ssh-daily-report.sh    # SSH日报
 │   ├── telegram-notify.sh     # Telegram通知
-│   ├── telegram-bot.py        # 交互式机器人
+│   ├── telegram-bot.py        # 交互式机器人 v3.0 (AI增强版)
 │   ├── deploy.sh              # 部署脚本
 │   ├── docker-manage.sh       # Docker管理
+│   ├── ssh-benchmark.sh       # SSH性能基准测试
+│   ├── ssh-optimize.sh        # SSH配置管理
+│   ├── deploy-ssh-config-test.sh # SSH配置部署测试
 │   └── sync-docs.sh           # 文档同步
-├── changelogs/                 # 变更日志
-│   └── 2026-04.md             # 按月归档
+├── changelogs/                 # 变更日志（按月归档）
+│   └── 2026-04.md             # 2026年4月变更
 ├── incidents/                  # 故障记录
 │   └── TEMPLATE.md            # 故障记录模板
-└── adr/                        # 架构决策记录
-    ├── 001-monitoring-stack.md    # 监控方案选择
-    └── 002-performance-optimization.md  # 性能优化方案
+├── adr/                        # 架构决策记录
+│   ├── 001-monitoring-stack.md    # 监控方案选择
+│   └── 002-performance-optimization.md  # 性能优化方案
+├── backups/                    # 本地备份文件
+├── configs/                    # 配置文件备份
+└── logs/                       # 日志文件
 ```
 
 ---
@@ -74,6 +82,23 @@ deploy --all                    # 部署全部
 # 备份
 backup                          # 执行备份
 backup -q                       # 静默模式
+
+# SSH 性能优化
+ssh-benchmark.sh --baseline     # 建立性能基准
+ssh-optimize.sh deploy          # 部署 SSH 优化配置
+ssh-optimize.sh status          # 查看配置状态
+ssh-optimize.sh rollback        # 回滚配置
+
+# Telegram 机器人
+# 在 Telegram 中发送以下命令：
+/start                          # 启动机器人，显示主菜单
+/status                         # 服务器状态
+/services                       # 服务列表
+/logs                           # 查看日志
+/backup                         # 手动触发备份
+/sshstatus                      # SSH 性能状态
+/sshperformance                 # SSH 性能测试
+/sshoptimize                    # SSH 优化建议
 
 # 测试通知
 telegram-notify --test "测试消息"
@@ -139,8 +164,10 @@ telegram-notify --test "测试消息"
 - [安全配置](./docs/SECURITY.md) - 防火墙、SSH、Fail2ban
 
 ### 记录
-- [变更日志](./changelogs/2026-04.md) - 按月归档
+- [总变更日志](./CHANGELOG.md) - 完整变更历史
+- [按月变更日志](./changelogs/2026-04.md) - 按月归档
 - [故障记录模板](./incidents/TEMPLATE.md) - 故障记录格式
+- [Claude协作指南](./CLAUDE.md) - Claude 使用指南
 
 ### 架构决策
 - [ADR-001](./adr/001-monitoring-stack.md) - 监控方案选择
@@ -157,6 +184,7 @@ telegram-notify --test "测试消息"
 | 2026-04-11 | 日志聚合、自动化部署、容器管理 | Claude |
 | 2026-04-11 | 性能优化（内核调优、资源限制） | Claude |
 | 2026-04-11 | SSH通知改为每日汇总 | Claude |
+| 2026-04-12 | SSH性能优化系统、Telegram机器人v3.0 | Claude |
 
 ---
 

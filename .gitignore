@@ -12,3 +12,29 @@
 # 备份文件
 *.tar.gz
 *.tar.gz.gpg
+*.backup
+*.backup.*
+
+# 临时/测试文件
+deploy-test.sh
+test-*
+/tmp/
+
+# 生成的文件和目录
+configs/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 系统日志和缓存
+*.log
+.cache/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 敏感数据（已加密的备份）
+*.gpg
