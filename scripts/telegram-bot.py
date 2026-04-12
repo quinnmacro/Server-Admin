@@ -34,6 +34,7 @@ import sys
 import subprocess
 import logging
 import json
+import re
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -45,6 +46,17 @@ CONFIG_FILE = "/Users/liulu/.monitoring/config.conf"
 # AI 配置
 AI_BASE_URL = "https://cloud.infini-ai.com/maas/coding"
 AI_MODEL = "deepseek-v3.2"  # 可选: glm-5, deepseek-v3.2, kimi-k2.5, minimax-m2.7
+
+# Markdown 转义辅助函数
+def escape_markdown(text: str) -> str:
+    """转义Markdown特殊字符"""
+    if not text:
+        return text
+    # 需要转义的字符: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 # 从配置文件读取
 def load_config():
@@ -288,8 +300,9 @@ async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = call_ai(user_message, system_prompt)
 
-    # 更新消息
-    await thinking_msg.edit_text(f"🤖 *AI 回复:*\n\n{response}", parse_mode='Markdown')
+    # 更新消息（转义Markdown避免解析错误）
+    escaped_response = escape_markdown(response)
+    await thinking_msg.edit_text(f"🤖 *AI 回复:*\n\n{escaped_response}", parse_mode='Markdown')
     logger.info(f"AI chat: {user_message[:50]}...")
 
 async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,7 +310,17 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("🔍 正在收集服务器信息并分析...")
+    # 判断是来自消息还是回调查询
+    if update.callback_query:
+        message = update.callback_query.message
+        thinking_msg = await message.reply_text("🔍 正在收集服务器信息并分析...")
+    elif update.message:
+        message = update.message
+        thinking_msg = await message.reply_text("🔍 正在收集服务器信息并分析...")
+    else:
+        # 无法回复
+        logger.error("无法获取消息对象")
+        return
 
     # 获取服务器上下文
     server_context = get_server_context()
@@ -315,7 +338,9 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = call_ai(prompt, system_prompt)
 
-    await thinking_msg.edit_text(f"🔍 *AI 服务器分析*\n\n{response}", parse_mode='Markdown')
+    # 转义Markdown避免解析错误
+    escaped_response = escape_markdown(response)
+    await thinking_msg.edit_text(f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
     logger.info("AI analysis executed")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,7 +375,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = call_ai(user_message, system_prompt)
 
-    await thinking_msg.edit_text(f"🤖 {response}", parse_mode='Markdown')
+    # 转义Markdown避免解析错误
+    escaped_response = escape_markdown(response)
+    await thinking_msg.edit_text(f"🤖 {escaped_response}", parse_mode='Markdown')
     logger.info(f"Message handled: {user_message[:50]}...")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -682,7 +709,9 @@ async def ssh_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     system_prompt = "你是一个专业的SSH服务器优化专家，擅长性能调优和安全配置。请用中文回答，提供具体的配置命令。"
     response = call_ai(prompt, system_prompt)
 
-    await thinking_msg.edit_text(f"🔧 *SSH优化建议*\n\n{response}", parse_mode='Markdown')
+    # 转义Markdown避免解析错误
+    escaped_response = escape_markdown(response)
+    await thinking_msg.edit_text(f"🔧 *SSH优化建议*\n\n{escaped_response}", parse_mode='Markdown')
     logger.info("SSH optimize suggestion executed")
 
 async def ssh_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1260,13 +1289,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "ai_analyze":
-        # 模拟调用 ai_analyze
-        class FakeUpdate:
-            def __init__(self, original_update):
-                self.message = None
-                self.callback_query = original_update.callback_query
-                self.effective_chat = original_update.effective_chat
-        await ai_analyze(FakeUpdate(update), context)
+        # 直接调用 ai_analyze，update对象已经包含callback_query
+        await ai_analyze(update, context)
 
     elif data == "diagnose_menu":
         # 显示系统诊断子菜单
@@ -1506,8 +1530,8 @@ def main():
     logger.info("Bot v3.0 starting with AI and SSH performance support...")
     print("Server-Admin Bot v3.0 已启动 (AI增强版 + SSH性能监控)")
 
-    # 启动机器人 (使用 polling)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
