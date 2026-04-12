@@ -377,7 +377,7 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(msg, parse_mode='Markdown')
 
     # 异步执行备份
-    run_command("/usr/local/sbin/monitoring/backup.sh &")
+    run_command("/Users/liulu/Server-Admin/scripts/backup.sh &")
     logger.info("Backup command executed")
 
 async def restart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1004,7 +1004,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "backup_status":
         # 显示备份状态
-        backup_status = run_command("/usr/local/sbin/monitoring/backup.sh --status 2>&1 || echo '无法获取备份状态'")
+        backup_status = run_command("/Users/liulu/Server-Admin/scripts/backup.sh -s 2>&1 || echo '无法获取备份状态'")
         await query.edit_message_text(
             f"📊 *备份状态*\n\n```\n{backup_status}\n```",
             parse_mode='Markdown'

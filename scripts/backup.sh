@@ -6,7 +6,7 @@
 source /etc/monitoring/config.conf 2>/dev/null
 
 # 备份配置
-BACKUP_DIR="/var/backups"
+BACKUP_DIR="/Users/liulu/Server-Admin/backups"
 DAILY_DIR="${BACKUP_DIR}/daily"
 WEEKLY_DIR="${BACKUP_DIR}/weekly"
 MONTHLY_DIR="${BACKUP_DIR}/monthly"
@@ -15,9 +15,10 @@ RETENTION_DAYS=7
 QUIET=false
 
 # 解析参数
-while getopts "q" opt; do
+while getopts "qs" opt; do
     case $opt in
         q) QUIET=true ;;
+        s) STATUS=true ;;
     esac
 done
 
@@ -47,7 +48,7 @@ BACKUP_ITEMS=(
 # 创建备份
 create_backup() {
     local timestamp=$(date '+%Y%m%d_%H%M%S')
-    local backup_file="${DAILY_DIR}/backup_${timestamp}.tar.gz.gpg"
+    local backup_file="${DAILY_DIR}/backup_${timestamp}.tar.gz"
     local temp_dir=$(mktemp -d)
     local total_size=0
     
@@ -79,8 +80,13 @@ create_backup() {
 备份项目: ${#BACKUP_ITEMS[@]}
 INFO
     
-    # 压缩并加密
-    tar -czf - -C "$temp_dir" . | openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:"$KEY_FILE" -out "$backup_file"
+    # 压缩（如果密钥文件存在则加密）
+    if [ -f "$KEY_FILE" ]; then
+        tar -czf - -C "$temp_dir" . | openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:"$KEY_FILE" -out "$backup_file"
+    else
+        tar -czf "$backup_file" -C "$temp_dir" .
+        log "警告: 未使用加密 (密钥文件不存在: $KEY_FILE)"
+    fi
     
     local backup_size=$(du -h "$backup_file" | cut -f1)
     total_size=$backup_size
@@ -96,15 +102,15 @@ INFO
 # 清理旧备份
 cleanup_old_backups() {
     log "清理旧备份..."
-    find "$DAILY_DIR" -name "*.gpg" -mtime +${RETENTION_DAYS} -delete 2>/dev/null
-    find "$WEEKLY_DIR" -name "*.gpg" -mtime +30 -delete 2>/dev/null
-    find "$MONTHLY_DIR" -name "*.gpg" -mtime +365 -delete 2>/dev/null
+    find "$DAILY_DIR" -name "*.tar.gz" -mtime +${RETENTION_DAYS} -delete 2>/dev/null
+    find "$WEEKLY_DIR" -name "*.tar.gz" -mtime +30 -delete 2>/dev/null
+    find "$MONTHLY_DIR" -name "*.tar.gz" -mtime +365 -delete 2>/dev/null
 }
 
 # 创建周备份（周日）
 create_weekly_backup() {
     if [ $(date +%u) -eq 7 ]; then
-        local latest=$(ls -t "$DAILY_DIR"/*.gpg 2>/dev/null | head -1)
+        local latest=$(ls -t "$DAILY_DIR"/*.tar.gz 2>/dev/null | head -1)
         if [ -n "$latest" ]; then
             cp "$latest" "$WEEKLY_DIR/"
             log "已创建周备份"
@@ -115,7 +121,7 @@ create_weekly_backup() {
 # 创建月备份（每月1号）
 create_monthly_backup() {
     if [ $(date +%d) -eq 01 ]; then
-        local latest=$(ls -t "$DAILY_DIR"/*.gpg 2>/dev/null | head -1)
+        local latest=$(ls -t "$DAILY_DIR"/*.tar.gz 2>/dev/null | head -1)
         if [ -n "$latest" ]; then
             cp "$latest" "$MONTHLY_DIR/"
             log "已创建月备份"
@@ -123,8 +129,44 @@ create_monthly_backup() {
     fi
 }
 
+# 显示备份状态
+show_status() {
+    echo "📊 *备份状态报告*"
+    echo ""
+    echo "📁 *备份目录:*"
+    echo "• 每日备份: $DAILY_DIR"
+    echo "• 每周备份: $WEEKLY_DIR"
+    echo "• 每月备份: $MONTHLY_DIR"
+    echo ""
+    echo "📦 *备份统计:*"
+    echo "• 每日备份数量: $(ls -1 "$DAILY_DIR"/*.tar.gz 2>/dev/null | wc -l) 个"
+    echo "• 每周备份数量: $(ls -1 "$WEEKLY_DIR"/*.tar.gz 2>/dev/null | wc -l) 个"
+    echo "• 每月备份数量: $(ls -1 "$MONTHLY_DIR"/*.tar.gz 2>/dev/null | wc -l) 个"
+    echo ""
+    echo "🔄 *最新备份:*"
+    local latest_daily=$(ls -t "$DAILY_DIR"/*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$latest_daily" ]; then
+        echo "• 每日: $(basename "$latest_daily") ($(du -h "$latest_daily" | cut -f1))"
+        echo "• 创建时间: $(stat -f "%Sm" "$latest_daily" 2>/dev/null || echo "未知")"
+    else
+        echo "• 每日: 无备份"
+    fi
+    echo ""
+    echo "⚙️ *配置信息:*"
+    echo "• 备份项目数量: ${#BACKUP_ITEMS[@]} 个"
+    echo "• 保留天数: $RETENTION_DAYS 天"
+    echo "• 加密状态: $([ -f "$KEY_FILE" ] && echo "已启用" || echo "未启用")"
+    echo "• Telegram通知: $([ "$TELEGRAM_ENABLED" = "true" ] && echo "已启用" || echo "未启用")"
+}
+
 # 主函数
 main() {
+    # 如果请求状态，显示状态并退出
+    if [ "${STATUS:-false}" = "true" ]; then
+        show_status
+        exit 0
+    fi
+
     log "========== 备份开始 =========="
     
     local backup_file=$(create_backup)
@@ -135,7 +177,7 @@ main() {
         create_monthly_backup
         
         local backup_size=$(du -h "$backup_file" | cut -f1)
-        local backup_count=$(ls -1 "$DAILY_DIR"/*.gpg 2>/dev/null | wc -l)
+        local backup_count=$(ls -1 "$DAILY_DIR"/*.tar.gz 2>/dev/null | wc -l)
         
         notify "✅ 服务器备份完成
 
