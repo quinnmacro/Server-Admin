@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.6
-交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警
+Server-Admin Telegram Bot v3.7
+交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警 + 智能日志
 
 命令菜单:
 - /start  - 欢迎信息和主菜单
@@ -139,7 +139,7 @@ def status_emoji(status: str) -> str:
     else:
         return '🟡'
 
-# ==================== Phase 2: 主动告警系统 ====================
+# ==================== Phase 2: 主动告警 + 智能日志系统 ====================
 
 import threading
 import time as time_module
@@ -748,11 +748,12 @@ async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ```"""
 
     keyboard = [
-        [InlineKeyboardButton("📋 健康检查", callback_data="logs_health"),
-         InlineKeyboardButton("🔐 SSH日志", callback_data="logs_ssh")],
-        [InlineKeyboardButton("🚨 Fail2ban", callback_data="logs_fail2ban"),
-         InlineKeyboardButton("🐳 Docker", callback_data="logs_docker")],
-        [InlineKeyboardButton("🔙 返回", callback_data="start")]
+        [InlineKeyboardButton("🧠 智能分析", callback_data="analyze_logs"),
+         InlineKeyboardButton("📋 健康检查", callback_data="logs_health")],
+        [InlineKeyboardButton("🔐 SSH日志", callback_data="logs_ssh"),
+         InlineKeyboardButton("🚨 Fail2ban", callback_data="logs_fail2ban")],
+        [InlineKeyboardButton("🐳 Docker", callback_data="logs_docker"),
+         InlineKeyboardButton("🔙 返回", callback_data="start")]
     ]
 
     await reply_or_edit(update, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -802,6 +803,103 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     msg = f"✅ *容器已重启*\n\n`{container}`\n\n结果: {result}"
     await update.callback_query.edit_message_text(msg, parse_mode='Markdown')
     logger.info(f"Container {container} restarted")
+
+async def analyze_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """智能日志分析 - AI 自动诊断错误"""
+    if not authorized(update):
+        return
+    
+    processing_msg = await send_thinking(update, "🧠 正在分析日志...")
+    
+    try:
+        # 收集各类日志
+        logs_data = {}
+        
+        # 系统日志
+        logs_data['syslog'] = run_command("journalctl -p err -n 20 --no-pager 2>/dev/null || echo 无错误")
+        
+        # SSH 日志
+        logs_data['ssh'] = run_command("journalctl -u ssh -p warning -n 15 --no-pager 2>/dev/null || echo 无警告")
+        
+        # Docker 日志（最新容器的错误）
+        logs_data['docker'] = run_command("docker ps --format '{{.Names}}' 2>/dev/null | head -1 | xargs -I {} docker logs --tail 20 {} 2>&1 | grep -iE 'error|fail|exception' | tail -10 || echo 无错误")
+        
+        # Fail2ban 日志
+        logs_data['fail2ban'] = run_command("tail -20 /var/log/fail2ban.log 2>/dev/null | grep -iE 'ban|unban|fail' | tail -10 || echo 无记录")
+        
+        # 统计错误数量
+        error_counts = {
+            'syslog': len([l for l in logs_data['syslog'].split('\n') if l.strip() and '无错误' not in l]),
+            'ssh': len([l for l in logs_data['ssh'].split('\n') if l.strip() and '无警告' not in l]),
+            'docker': len([l for l in logs_data['docker'].split('\n') if l.strip() and '无错误' not in l]),
+            'fail2ban': len([l for l in logs_data['fail2ban'].split('\n') if l.strip() and '无记录' not in l]),
+        }
+        
+        total_errors = sum(error_counts.values())
+        
+        # 构建分析报告
+        report = f"""🧠 <b>智能日志分析报告</b>
+
+📊 <b>错误统计</b>:
+  ├ 系统日志: {error_counts['syslog']} 条错误
+  ├ SSH 日志: {error_counts['ssh']} 条警告
+  ├ Docker 日志: {error_counts['docker']} 条错误
+  └ Fail2ban: {error_counts['fail2ban']} 条记录
+
+📈 <b>总问题数</b>: {total_errors} 条
+"""
+        
+        # 如果有错误，调用 AI 分析
+        if total_errors > 0:
+            # 准备 AI 分析提示
+            ai_prompt = f"""分析以下服务器日志，找出关键问题并给出解决建议：
+
+系统日志（最近错误）:
+{logs_data['syslog'][:500]}
+
+SSH 日志（最近警告）:
+{logs_data['ssh'][:500]}
+
+Docker 日志（最近错误）:
+{logs_data['docker'][:500]}
+
+请简洁总结：
+1. 最关键的 1-2 个问题
+2. 可能的根因
+3. 建议的解决步骤（不超过3步）
+"""
+            
+            # 调用 AI
+            ai_analysis = await acall_ai(ai_prompt, system_prompt="你是服务器运维专家，简洁专业地分析日志问题。")
+            
+            report += f"\n💡 <b>AI 诊断建议</b>:\n{ai_analysis[:500]}"
+        
+        else:
+            report += "\n\n✅ <b>系统运行正常</b>\n未发现严重错误或警告。"
+        
+        # 删除处理消息
+        if processing_msg:
+            try:
+                await processing_msg.delete()
+            except:
+                pass
+        
+        # 添加操作按钮
+        keyboard = [
+            [InlineKeyboardButton("📋 详细日志", callback_data="logs"),
+             InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu")],
+            [InlineKeyboardButton("🔄 重新分析", callback_data="analyze_logs"),
+             InlineKeyboardButton("🔙 主菜单", callback_data="start")]
+        ]
+        
+        await reply_or_edit(update, report, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # 记录操作
+        log_operation("analyze_logs", "all", result="success", details=f"Found {total_errors} issues")
+        
+    except Exception as e:
+        logger.error(f"Log analysis error: {e}")
+        await reply_or_edit(update, f"⚠️ 分析失败: {str(e)}", parse_mode='HTML')
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看操作历史"""
@@ -1496,7 +1594,7 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.6</b>
+    return """🤖 <b>Server-Admin Bot v3.7</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1548,6 +1646,7 @@ CALLBACK_ROUTES = {
     "help": help_cmd,
     "ai_analyze": ai_analyze,
     "quick_diagnose": quick_diagnose,
+    "analyze_logs": analyze_logs,
     "ssh_report": ssh_performance,
     "ssh_optimize": ssh_optimize,
     "ssh_diagnose": ssh_diagnose,
@@ -2191,6 +2290,7 @@ def main():
     application.add_handler(CommandHandler("ai", ai_chat))
     application.add_handler(CommandHandler("analyze", ai_analyze))
     application.add_handler(CommandHandler("history", history_cmd))
+    application.add_handler(CommandHandler("analyze_logs", analyze_logs))
     application.add_handler(CommandHandler("help", help_cmd))
     # SSH性能命令
     application.add_handler(CommandHandler("sshstatus", ssh_status))
@@ -2209,8 +2309,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.6 starting with AI, SSH performance, and alert monitoring...")
-    print("Server-Admin Bot v3.6 已启动 (AI增强 + SSH性能 + 主动告警)")
+    logger.info("Bot v3.7 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v3.7 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
