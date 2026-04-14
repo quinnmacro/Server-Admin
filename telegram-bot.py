@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.7
+Server-Admin Telegram Bot v3.8
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警 + 智能日志
 
 命令菜单:
@@ -177,25 +177,41 @@ def log_operation(operation: str, target: str = "", user: str = "telegram", resu
     except Exception as e:
         logger.error(f"Failed to log operation: {e}")
 
-def get_recent_operations(limit: int = 20, operation_type: str = None) -> list:
-    """获取最近的操作历史"""
+def get_recent_operations(limit: int = 20, operation_type: str = None, offset: int = 0) -> list:
+    """获取最近的操作历史（支持分页）"""
     try:
         conn = sqlite3.connect(HISTORY_DB)
         c = conn.cursor()
         if operation_type:
             c.execute("""SELECT timestamp, operation, target, result, details 
                          FROM operations WHERE operation = ? 
-                         ORDER BY timestamp DESC LIMIT ?""", (operation_type, limit))
+                         ORDER BY timestamp DESC LIMIT ? OFFSET ?""", (operation_type, limit, offset))
         else:
             c.execute("""SELECT timestamp, operation, target, result, details 
                          FROM operations 
-                         ORDER BY timestamp DESC LIMIT ?""", (limit,))
+                         ORDER BY timestamp DESC LIMIT ? OFFSET ?""", (limit, offset))
         rows = c.fetchall()
         conn.close()
         return rows
     except Exception as e:
         logger.error(f"Failed to get operations: {e}")
         return []
+
+def get_operation_count(operation_type: str = None) -> int:
+    """获取操作总数"""
+    try:
+        conn = sqlite3.connect(HISTORY_DB)
+        c = conn.cursor()
+        if operation_type:
+            c.execute("SELECT COUNT(*) FROM operations WHERE operation = ?", (operation_type,))
+        else:
+            c.execute("SELECT COUNT(*) FROM operations")
+        count = c.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        logger.error(f"Failed to get operation count: {e}")
+        return 0
 
 # 初始化数据库
 init_history_db()
@@ -648,7 +664,7 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("AI analysis executed")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理普通消息（AI 对话）"""
+    """处理普通消息（自然语言指令 + AI 对话）"""
     if not authorized(update):
         return
 
@@ -656,11 +672,76 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text and update.message.text.startswith('/'):
         return
 
-    # 当作 AI 对话处理
     user_message = update.message.text if update.message else ""
     if not user_message.strip():
         return
 
+    # ========== 自然语言指令识别 ==========
+    msg_lower = user_message.lower()
+    
+    # 重启指令
+    if any(kw in msg_lower for kw in ['重启', 'restart', '重启一下']):
+        # 尝试提取服务/容器名
+        for svc in ['nginx', 'docker', 'ssh', 'fail2ban', 'homepage', 'mem0']:
+            if svc in msg_lower:
+                if svc in ['nginx', 'homepage', 'mem0']:
+                    # Docker 容器
+                    await update.message.reply_text(f"🔄 正在重启容器 {svc}...", parse_mode='HTML')
+                    result = run_command(f"docker restart {svc} 2>&1")
+                    await update.message.reply_text(f"✅ 容器 {svc} 已重启\n```\n{result}\n```", parse_mode='Markdown')
+                    log_operation("restart_container", svc, result="success")
+                else:
+                    # 系统服务
+                    if validate_service_name(svc):
+                        result = run_command(f"systemctl restart {svc} 2>&1")
+                        new_status = run_command(f"systemctl is-active {svc}")
+                        await update.message.reply_text(f"✅ 服务 {svc} 已重启\n状态: {status_emoji(new_status)} {new_status}", parse_mode='HTML')
+                        log_operation("restart_service", svc, result=new_status.strip())
+                return
+        
+        # 没有指定服务，询问用户
+        await update.message.reply_text("🔄 请指定要重启的服务或容器，例如：\n• 重启 nginx\n• 重启 docker\n• 重启 ssh", parse_mode='HTML')
+        return
+    
+    # 查看状态
+    if any(kw in msg_lower for kw in ['状态', 'status', '查看状态', '怎么样']):
+        await status(update, context)
+        return
+    
+    # 查看日志
+    if any(kw in msg_lower for kw in ['日志', 'log', '查看日志', '看日志']):
+        await logs(update, context)
+        return
+    
+    # 备份
+    if any(kw in msg_lower for kw in ['备份', 'backup', '帮我备份', '做备份']):
+        await backup(update, context)
+        return
+    
+    # 诊断
+    if any(kw in msg_lower for kw in ['诊断', 'diagnose', '检查问题', '排查']):
+        await quick_diagnose(update, context)
+        return
+    
+    # 磁盘空间
+    if any(kw in msg_lower for kw in ['磁盘', 'disk', '空间', '容量']):
+        disk_info = run_command("df -h")
+        await update.message.reply_text(f"💿 <b>磁盘使用情况</b>\n\n<pre>{disk_info}</pre>", parse_mode='HTML')
+        return
+    
+    # 内存使用
+    if any(kw in msg_lower for kw in ['内存', 'memory', 'ram']):
+        mem_info = run_command("free -h")
+        await update.message.reply_text(f"💾 <b>内存使用情况</b>\n\n<pre>{mem_info}</pre>", parse_mode='HTML')
+        return
+    
+    # Docker 容器
+    if any(kw in msg_lower for kw in ['容器', 'container', 'docker']):
+        containers = run_command("docker ps -a --format 'table {{.Names}}\\t{{.Status}}'")
+        await update.message.reply_text(f"🐳 <b>Docker 容器</b>\n\n<pre>{containers}</pre>", parse_mode='HTML')
+        return
+
+    # ========== 未识别指令，走 AI 对话 ==========
     thinking_msg = await update.message.reply_text("🤔 思考中...")
 
     # 获取服务器上下文
@@ -675,7 +756,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 当前服务器信息:
 {server_context}
 
-请用简洁、专业的中文回复。如果需要执行操作，请告诉用户具体命令。"""
+请用简洁、专业的中文回复。如果需要执行操作，请告诉用户具体命令。
+
+注意：用户可以直接用自然语言操作服务器，例如：
+- "重启 nginx" → 自动重启容器
+- "查看日志" → 显示日志菜单
+- "磁盘空间" → 显示磁盘使用
+- "备份一下" → 执行备份"""
 
     response = await acall_ai(user_message, system_prompt)
 
@@ -902,38 +989,53 @@ Docker 日志（最近错误）:
         await reply_or_edit(update, f"⚠️ 分析失败: {str(e)}", parse_mode='HTML')
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看操作历史"""
+    """查看操作历史（支持分页）"""
     if not authorized(update):
         return
     
-    # 获取最近 20 条操作
-    operations = get_recent_operations(limit=20)
+    # 获取页码（默认第1页）
+    page = 1
+    per_page = 10
+    
+    # 构建历史列表
+    total = get_operation_count()
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+    
+    operations = get_recent_operations(limit=per_page, offset=(page-1)*per_page)
     
     if not operations:
         await reply_or_edit(update, "📝 <b>操作历史</b>\n\n暂无操作记录", parse_mode='HTML')
         return
     
-    # 构建历史列表
-    lines = ["📝 <b>操作历史</b>\n"]
+    lines = [f"📝 <b>操作历史</b> (第 {page}/{total_pages} 页)\n"]
     for ts, op, target, result, details in operations:
-        # 格式化时间
         time_str = ts.split('.')[0] if '.' in ts else ts
-        # 状态图标
         icon = "✅" if result == "success" else "❌"
-        # 操作行
         line = f"{icon} <i>{time_str}</i> {op}"
         if target:
             line += f" → <b>{target}</b>"
         lines.append(line)
     
-    # 添加过滤按钮
+    # 分页按钮
+    keyboard = []
+    if page > 1:
+        keyboard.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"history_page_{page-1}"))
+    if page < total_pages:
+        keyboard.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"history_page_{page+1}"))
+    
+    nav_row = keyboard if keyboard else []
+    
     keyboard = [
         [InlineKeyboardButton("🔄 重启操作", callback_data="history_restart"),
          InlineKeyboardButton("💾 备份操作", callback_data="history_backup")],
         [InlineKeyboardButton("🔧 服务操作", callback_data="history_service"),
          InlineKeyboardButton("📊 全部", callback_data="history_all")],
+        nav_row,
         [InlineKeyboardButton("🔙 主菜单", callback_data="start")]
     ]
+    
+    # 过滤空行
+    keyboard = [row for row in keyboard if row]
     
     await reply_or_edit(update, '\n'.join(lines), parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1594,7 +1696,7 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.7</b>
+    return """🤖 <b>Server-Admin Bot v3.8</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1683,20 +1785,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 历史过滤回调
     elif data.startswith("history_"):
         filter_type = data.replace("history_", "")
-        operation_map = {
-            "restart": "restart",
-            "backup": "backup",
-            "service": "service",
-            "all": None
-        }
-        operation_type = operation_map.get(filter_type)
-        operations = get_recent_operations(limit=20, operation_type=operation_type)
+        
+        # 处理分页
+        if filter_type.startswith("page_"):
+            page = int(filter_type.split("_")[1])
+            operation_type = None
+        else:
+            page = 1
+            operation_map = {
+                "restart": "restart",
+                "backup": "backup",
+                "service": "service",
+                "all": None
+            }
+            operation_type = operation_map.get(filter_type)
+        
+        per_page = 10
+        total = get_operation_count(operation_type)
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        
+        operations = get_recent_operations(limit=per_page, operation_type=operation_type, offset=(page-1)*per_page)
         
         if not operations:
             await query.edit_message_text("📝 <b>操作历史</b>\n\n暂无记录", parse_mode='HTML')
             return
         
-        lines = [f"📝 <b>操作历史</b> ({filter_type})\n"]
+        lines = [f"📝 <b>操作历史</b> (第 {page}/{total_pages} 页)\n"]
         for ts, op, target, result, details in operations:
             time_str = ts.split('.')[0] if '.' in ts else ts
             icon = "✅" if result == "success" else "❌"
@@ -1705,7 +1819,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 line += f" → <b>{target}</b>"
             lines.append(line)
         
-        await query.edit_message_text('\n'.join(lines), parse_mode='HTML')
+        # 构建分页按钮
+        keyboard = []
+        if page > 1:
+            keyboard.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"history_page_{page-1}"))
+        if page < total_pages:
+            keyboard.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"history_page_{page+1}"))
+        
+        nav_row = keyboard if keyboard else []
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 重启", callback_data="history_restart"),
+             InlineKeyboardButton("💾 备份", callback_data="history_backup")],
+            [InlineKeyboardButton("🔧 服务", callback_data="history_service"),
+             InlineKeyboardButton("📊 全部", callback_data="history_all")],
+            nav_row,
+            [InlineKeyboardButton("🔙 主菜单", callback_data="start")]
+        ]
+        
+        keyboard = [row for row in keyboard if row]
+        
+        await query.edit_message_text('\n'.join(lines), parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
     elif data == "services_menu":
@@ -2309,8 +2443,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.7 starting with AI, SSH performance, and alert monitoring...")
-    print("Server-Admin Bot v3.7 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
+    logger.info("Bot v3.8 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v3.8 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
