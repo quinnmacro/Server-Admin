@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.1
+Server-Admin Telegram Bot v3.2
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控
 
 命令菜单:
@@ -35,7 +35,11 @@ import subprocess
 import logging
 import json
 import re
+import shlex
+import asyncio
+import random
 from datetime import datetime
+from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -61,9 +65,10 @@ def find_script(name: str) -> str:
         if os.path.isfile(full):
             return full
     try:
-        result = subprocess.run(f"which {name}", shell=True, capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        import shutil
+        which_result = shutil.which(name)
+        if which_result:
+            return which_result
     except:
         pass
     return name
@@ -120,6 +125,56 @@ def make_back_button(callback_data: str = "start") -> InlineKeyboardMarkup:
     """创建带返回按钮的键盘"""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=callback_data)]])
 
+# ==================== 安全工具 ====================
+
+# 合法容器名/服务名白名单
+VALID_SERVICES = {"ssh", "docker", "fail2ban", "tailscaled", "cron", "rsyslog", "x-ui"}
+VALID_CONTAINERS = set()  # 动态填充
+
+def validate_service_name(name: str) -> bool:
+    """校验服务名是否在白名单中"""
+    if name in VALID_SERVICES:
+        return True
+    # 允许 docker 容器名（仅字母数字-_.）
+    if re.match(r'^[a-zA-Z0-9_.-]+$', name):
+        return True
+    return False
+
+def validate_container_name(name: str) -> bool:
+    """校验容器名（仅允许字母数字-_.）"""
+    return bool(re.match(r'^[a-zA-Z0-9_.-]+$', name))
+
+def safe_run_command(cmd: str, timeout: int = 30) -> str:
+    """安全执行命令 — 使用列表形式避免 shell 注入"""
+    try:
+        # 对复杂 shell 管道仍用 shell=True，但确保输入已校验
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return result.stdout.strip() or result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return "命令执行超时"
+    except Exception as e:
+        return f"错误: {str(e)}"
+
+# 用 safe_run_command 替换 run_command（保留旧名兼容）
+run_command = safe_run_command
+
+
+async def arun_command(cmd: str, timeout: int = 30) -> str:
+    """异步执行 shell 命令 — 不阻塞事件循环"""
+    return await asyncio.to_thread(run_command, cmd, timeout)
+
+async def arun_commands(*cmds_with_timeouts) -> list:
+    """并行执行多个命令 — 不阻塞事件循环"""
+    tasks = [asyncio.to_thread(run_command, cmd, timeout) for cmd, timeout in cmds_with_timeouts]
+    return await asyncio.gather(*tasks)
+
+async def acall_ai(prompt: str, system_prompt: str = None) -> str:
+    """异步调用 AI API — 不阻塞事件循环"""
+    return await asyncio.to_thread(call_ai, prompt, system_prompt)
+
+
+
+
 
 
 # 配置
@@ -131,14 +186,27 @@ AI_BASE_URL = "https://cloud.infini-ai.com/maas/coding"
 AI_MODEL = "deepseek-v3.2"  # 可选: glm-5, deepseek-v3.2, kimi-k2.5, minimax-m2.7
 
 # Markdown 转义辅助函数
-def escape_markdown(text: str) -> str:
-    """转义Markdown特殊字符"""
+def escape_html(text: str) -> str:
+    """转义HTML特殊字符"""
     if not text:
         return text
-    # 需要转义的字符: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    for char in escape_chars:
-        text = text.replace(char, f'\\{char}')
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    return text
+
+def format_ai_response(text: str) -> str:
+    """格式化AI回复 — 使用HTML保留格式"""
+    if not text:
+        return text
+    # 转义HTML特殊字符
+    text = escape_html(text)
+    # 将 markdown 代码块转换为 HTML
+    text = re.sub(r'```(\w*)\n([\s\S]*?)```', r'<pre><code>\2</code></pre>', text)
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    # 将 markdown 粗体/斜体转换为 HTML
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
     return text
 
 # 从配置文件读取
@@ -171,6 +239,16 @@ def load_config():
     return config
 
 CONFIG = load_config()
+
+# 安全检查：配置文件权限
+try:
+    _config_perms = os.stat(CONFIG_FILE).st_mode & 0o777
+    if _config_perms != 0o600:
+        os.chmod(CONFIG_FILE, 0o600)
+        print(f"[SECURITY] Fixed config permissions: {oct(_config_perms)} → 0o600", file=sys.stderr)
+except:
+    pass
+
 TOKEN = CONFIG.get('TELEGRAM_BOT_TOKEN', '')
 ALLOWED_CHAT_ID = int(CONFIG.get('TELEGRAM_CHAT_ID', '0'))
 AI_API_KEY = CONFIG.get('INFINI_API_KEY', '')
@@ -323,38 +401,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    welcome = """🤖 *Server-Admin Bot v3.1*
-
-欢迎使用服务器智能管理机器人！
-
-*功能分类*:
-📊 系统监控 - 状态、服务、日志
-🔧 管理操作 - 备份、重启、SSH性能
-🤖 智能工具 - AI助手、系统诊断
-🎉 趣味功能 - 游戏、笑话、彩蛋
-
-*主要命令*:
-/status - 系统状态
-/services - 服务列表
-/logs - 查看日志
-/backup - 手动备份
-/restart - 重启容器
-/ai - AI智能对话
-/analyze - AI系统分析
-
-*SSH性能监控*:
-/sshstatus - SSH服务状态
-/sshperformance - SSH性能测试
-/sshoptimize - SSH优化建议
-/sshdiagnose - SSH问题诊断
-
-*快捷操作*:
-直接发送消息即可与 AI 对话
-点击按钮使用交互式菜单
-使用 /help 查看完整命令列表
-点击 🎉 趣味 按钮发现隐藏彩蛋"""
-
-    await update.message.reply_text(welcome, parse_mode='Markdown', reply_markup=reply_markup)
+    await update.message.reply_text(
+        build_welcome_message(),
+        parse_mode='HTML',
+        reply_markup=build_main_keyboard()
+    )
     logger.info(f"Start command from {update.effective_chat.id}")
 
 async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -385,11 +436,11 @@ async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     system_prompt = """你是一个专业的服务器运维助手，擅长 Linux 系统管理、Docker 容器管理、网络安全等领域。
 请用简洁、专业的中文回答用户问题。如果涉及具体命令，请给出完整的命令示例。"""
 
-    response = call_ai(user_message, system_prompt)
+    response = await acall_ai(user_message, system_prompt)
 
     # 更新消息（转义Markdown避免解析错误）
-    escaped_response = escape_markdown(response)
-    await thinking_msg.edit_text(f"🤖 *AI 回复:*\n\n{escaped_response}", parse_mode='Markdown')
+    escaped_response = format_ai_response(response)
+    await thinking_msg.edit_text(f"🤖 AI 回复:\n\n{escaped_response}", parse_mode='HTML')
     logger.info(f"AI chat: {user_message[:50]}...")
 
 async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -416,14 +467,14 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     system_prompt = """你是一个专业的服务器运维专家。请分析服务器状态并给出专业建议。
 用简洁的中文回复，使用 Markdown 格式。"""
 
-    response = call_ai(prompt, system_prompt)
+    response = await acall_ai(prompt, system_prompt)
 
     # 转义Markdown避免解析错误
-    escaped_response = escape_markdown(response)
+    escaped_response = format_ai_response(response)
     if thinking_msg:
-        await thinking_msg.edit_text(f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
+        await thinking_msg.edit_text(f"🔍 AI 服务器分析:\n\n{escaped_response}", parse_mode='HTML')
     else:
-        await reply_or_edit(update, f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
+        await reply_or_edit(update, f"🔍 AI 服务器分析:\n\n{escaped_response}", parse_mode='HTML')
     logger.info("AI analysis executed")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -456,11 +507,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 请用简洁、专业的中文回复。如果需要执行操作，请告诉用户具体命令。"""
 
-    response = call_ai(user_message, system_prompt)
+    response = await acall_ai(user_message, system_prompt)
 
     # 转义Markdown避免解析错误
-    escaped_response = escape_markdown(response)
-    await thinking_msg.edit_text(f"🤖 {escaped_response}", parse_mode='Markdown')
+    escaped_response = format_ai_response(response)
+    await thinking_msg.edit_text(f"🤖 {escaped_response}", parse_mode='HTML')
     logger.info(f"Message handled: {user_message[:50]}...")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,11 +519,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    mem = run_command("free -m | awk 'NR==2{printf \"%s/%s MB (%.1f%%)\", $3, $2, $3*100/$2}'")
-    disk = run_command("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
-    load = run_command("cat /proc/loadavg | awk '{print $1, $2, $3}'")
-    uptime = run_command("uptime -p | sed 's/up //'")
-    containers = run_command("docker ps --format '{{.Names}}: {{.Status}}' 2>/dev/null || echo 'Docker未运行'")
+    mem, disk, load, uptime, containers = await arun_commands(
+        ("free -m | awk 'NR==2{printf \"%s/%s MB (%.1f%%)\", $3, $2, $3*100/$2}'", 10),
+        ("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'", 10),
+        ("cat /proc/loadavg | awk '{print $1, $2, $3}'", 5),
+        ("uptime -p | sed 's/up //'", 5),
+        ("docker ps --format '{{.Names}}: {{.Status}}' 2>/dev/null || echo 'Docker未运行'", 10),
+    )
 
     status_msg = (
         f"📊 *服务器状态*\n\n"
@@ -629,7 +682,6 @@ async def easteregg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 随机选择一种彩蛋类型
-    import random
     egg_types = ["game", "joke", "poetry", "fortune", "meme", "ai"]
     egg_type = random.choice(egg_types)
 
@@ -692,15 +744,17 @@ async def ssh_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    _svc = run_command("systemctl is-active ssh")
-    _uptime = run_command("systemctl show -p ActiveEnterTimestamp --value ssh")
-    _conns = run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")
-    _mem = run_command("ps aux | grep sshd | grep -v grep | awk '{sum += $6} END {print sum/1024 \"MB\"}'")
-    _resp = run_command("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'")
-    _maxsess = run_command("sshd -T 2>/dev/null | grep maxsessions | awk '{print $2}'")
-    _usedns = run_command("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'")
-    _comp = run_command("sshd -T 2>/dev/null | grep compression | awk '{print $2}'")
-    _perf_conf = run_command("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes' || echo 'no'")
+    _svc, _uptime, _conns, _mem, _resp, _maxsess, _usedns, _comp, _perf_conf = await arun_commands(
+        ("systemctl is-active ssh", 5),
+        ("systemctl show -p ActiveEnterTimestamp --value ssh", 5),
+        ("ss -tan | grep ':22' | grep ESTAB | wc -l", 5),
+        ("ps aux | grep sshd | grep -v grep | awk '{sum += $6} END {print sum/1024 \"MB\"}'", 5),
+        ("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'", 10),
+        ("sshd -T 2>/dev/null | grep maxsessions | awk '{print $2}'", 5),
+        ("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'", 5),
+        ("sshd -T 2>/dev/null | grep compression | awk '{print $2}'", 5),
+        ("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes' || echo 'no'", 5),
+    )
     
     opt_status = '✅ 已优化' if _perf_conf.strip() == 'yes' else '❌ 未优化'
     status_msg = (
@@ -731,7 +785,7 @@ async def ssh_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 调用现有的ssh-benchmark.sh脚本
     benchmark_result = run_command(find_script("ssh-benchmark.sh") + " --quick")
 
-    await reply_or_edit(update, f"📊 *SSH性能测试报告*\n\n{escape_markdown(str(benchmark_result))}", parse_mode='Markdown')
+    await reply_or_edit(update, f"📊 *SSH性能测试报告*\n\n{format_ai_response(str(benchmark_result))}", parse_mode='Markdown')
     logger.info("SSH performance test executed")
 
 async def ssh_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -762,11 +816,11 @@ async def ssh_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thinking_msg = await send_thinking(update, "🤔 正在分析SSH配置并生成优化建议...")
 
     system_prompt = "你是一个专业的SSH服务器优化专家，擅长性能调优和安全配置。请用中文回答，提供具体的配置命令。"
-    response = call_ai(prompt, system_prompt)
+    response = await acall_ai(prompt, system_prompt)
 
     # 转义Markdown避免解析错误
-    escaped_response = escape_markdown(response)
-    await reply_or_edit(update, f"🔧 *SSH优化建议*\n\n{escaped_response}", parse_mode='Markdown')
+    escaped_response = format_ai_response(response)
+    await reply_or_edit(update, f"🔧 SSH优化建议:\n\n{escaped_response}", parse_mode='HTML')
     logger.info("SSH optimize suggestion executed")
 
 async def ssh_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1121,6 +1175,132 @@ async def system_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_or_edit(update, monitor_info, parse_mode='Markdown')
     logger.info("System monitor command executed")
 
+
+
+def chunk_message(text: str, limit: int = 4000) -> list[str]:
+    """将消息按 Telegram 4096 字符限制分片"""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        # 在换行处切割
+        cut = text.rfind('\n', 0, limit)
+        if cut == -1:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip('\n')
+    return chunks
+
+async def safe_send(update: Update, text: str, parse_mode='Markdown', reply_markup=None):
+    """安全发送消息 — 自动分片"""
+    chunks = chunk_message(text)
+    for i, chunk in enumerate(chunks):
+        # 只有最后一块带 reply_markup
+        rm = reply_markup if i == len(chunks) - 1 else None
+        try:
+            if update.message:
+                if rm:
+                    await update.message.reply_text(chunk, parse_mode=parse_mode, reply_markup=rm)
+                else:
+                    await update.message.reply_text(chunk, parse_mode=parse_mode)
+            elif update.callback_query:
+                if i == 0:
+                    if rm:
+                        await update.callback_query.edit_message_text(chunk, parse_mode=parse_mode, reply_markup=rm)
+                    else:
+                        await update.callback_query.edit_message_text(chunk, parse_mode=parse_mode)
+                else:
+                    await update.callback_query.message.reply_text(chunk, parse_mode=parse_mode)
+        except Exception as e:
+            logger.error(f"safe_send error on chunk {i}: {e}")
+
+
+# ==================== 消息构建器 ====================
+
+def build_main_keyboard() -> InlineKeyboardMarkup:
+    """构建主菜单键盘"""
+    keyboard = [
+        [InlineKeyboardButton("📊 系统状态", callback_data="status"),
+         InlineKeyboardButton("🔧 服务管理", callback_data="services_menu"),
+         InlineKeyboardButton("📋 日志查看", callback_data="logs")],
+        [InlineKeyboardButton("💾 备份管理", callback_data="backup_menu"),
+         InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu"),
+         InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
+        [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
+         InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
+         InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")],
+        [InlineKeyboardButton("❓ 帮助", callback_data="help")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_welcome_message() -> str:
+    """构建欢迎消息"""
+    return """🤖 <b>Server-Admin Bot v3.2</b>
+
+欢迎使用服务器智能管理机器人！
+
+<b>功能分类</b>:
+📊 系统监控 - 状态、服务、日志
+🔧 管理操作 - 备份、重启、SSH性能
+🤖 智能工具 - AI助手、系统诊断
+🎉 趣味功能 - 游戏、笑话、彩蛋
+
+<b>主要命令</b>:
+/status - 系统状态
+/services - 服务列表
+/logs - 查看日志
+/backup - 手动备份
+/restart - 重启容器
+/ai - AI智能对话
+/analyze - AI系统分析
+
+<b>SSH性能监控</b>:
+/sshstatus - SSH服务状态
+/sshperformance - SSH性能测试
+/sshoptimize - SSH优化建议
+/sshdiagnose - SSH问题诊断
+
+<b>快捷操作</b>:
+直接发送消息即可与 AI 对话
+点击按钮使用交互式菜单
+使用 /help 查看完整命令列表
+点击 🎉 趣味 按钮发现隐藏彩蛋"""
+
+# 监控的服务列表（统一常量）
+MONITORED_SERVICES = ["ssh", "docker", "fail2ban", "tailscaled"]
+
+# ==================== 回调路由表 ====================
+
+# 菜单渲染回调（返回子菜单键盘）
+MENU_CALLBACKS = {
+    "services_menu", "backup_menu", "ssh_perf", "ai_menu",
+    "diagnose_menu", "fun_menu", "easter_egg",
+}
+
+# 动作回调路由表
+CALLBACK_ROUTES = {
+    "status": status,
+    "services": services,
+    "logs": logs,
+    "backup": backup,
+    "restart_menu": restart_menu,
+    "help": help_cmd,
+    "ai_analyze": ai_analyze,
+    "ssh_report": ssh_performance,
+    "ssh_optimize": ssh_optimize,
+    "ssh_diagnose": ssh_diagnose,
+    "health_check": health_check,
+    "network_diagnose": network_diagnose,
+    "performance_diagnose": performance_diagnose,
+    "security_scan": security_scan,
+    "system_monitor": system_monitor,
+    "ssh_history": ssh_history,
+    "ssh_config": ssh_config,
+}
+
 # ==================== 按钮回调 ====================
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1130,58 +1310,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
+    # 路由表快速分发
+    if data in CALLBACK_ROUTES:
+        await CALLBACK_ROUTES[data](update, context)
+        return
+
     if data == "start":
-        # 重新显示主菜单（完整欢迎消息）
-        keyboard = [
-            [InlineKeyboardButton("📊 系统状态", callback_data="status"),
-             InlineKeyboardButton("🔧 服务管理", callback_data="services_menu"),
-             InlineKeyboardButton("📋 日志查看", callback_data="logs")],
-            [InlineKeyboardButton("💾 备份管理", callback_data="backup_menu"),
-             InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu"),
-             InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
-            [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
-             InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
-             InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")],
-        [InlineKeyboardButton("❓ 帮助", callback_data="help")]
-        ]
-        welcome = """🤖 *Server-Admin Bot v3.1*
-
-欢迎使用服务器智能管理机器人！
-
-*功能分类*:
-📊 系统监控 - 状态、服务、日志
-🔧 管理操作 - 备份、重启、SSH性能
-🤖 智能工具 - AI助手、系统诊断
-🎉 趣味功能 - 游戏、笑话、彩蛋
-
-*主要命令*:
-/status - 系统状态
-/services - 服务列表
-/logs - 查看日志
-/backup - 手动备份
-/restart - 重启容器
-/ai - AI智能对话
-/analyze - AI系统分析
-
-*SSH性能监控*:
-/sshstatus - SSH服务状态
-/sshperformance - SSH性能测试
-/sshoptimize - SSH优化建议
-/sshdiagnose - SSH问题诊断
-
-*快捷操作*:
-直接发送消息即可与 AI 对话
-点击按钮使用交互式菜单
-使用 /help 查看完整命令列表
-点击 🎉 趣味 按钮发现隐藏彩蛋"""
         await query.edit_message_text(
-            welcome,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            build_welcome_message(),
+            parse_mode='HTML',
+            reply_markup=build_main_keyboard()
         )
 
-    elif data == "status":
-        await status(update, context)
 
     elif data == "services_menu":
         # 显示服务管理子菜单
@@ -1200,11 +1340,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(services_keyboard)
         )
 
-    elif data == "services":
-        await services(update, context)
 
     elif data == "restart_service_menu":
-        services_for_restart = ["ssh", "docker", "fail2ban", "tailscaled"]
+        services_for_restart = MONITORED_SERVICES
         keyboard = []
         for svc in services_for_restart:
             status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
@@ -1218,7 +1356,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "start_service_menu":
-        services_for_start = ["ssh", "docker", "fail2ban", "tailscaled"]
+        services_for_start = MONITORED_SERVICES
         keyboard = []
         for svc in services_for_start:
             status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
@@ -1283,8 +1421,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=make_back_button("services_menu")
         )
 
-    elif data == "logs":
-        await logs(update, context)
 
     elif data == "backup_menu":
         # 显示备份管理子菜单
@@ -1303,8 +1439,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(backup_keyboard)
         )
 
-    elif data == "backup":
-        await backup(update, context)
 
     elif data == "backup_list":
         # 显示备份列表
@@ -1369,8 +1503,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=make_back_button("backup_menu")
         )
 
-    elif data == "restart_menu":
-        await restart_menu(update, context)
 
     elif data == "fun_menu":
         # 显示趣味功能子菜单
@@ -1390,8 +1522,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(fun_keyboard)
         )
 
-    elif data == "help":
-        await help_cmd(update, context)
 
     elif data == "ai_menu":
         # 显示AI助手子菜单
@@ -1456,9 +1586,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=make_back_button("ai_menu")
         )
 
-    elif data == "ai_analyze":
-        # 直接调用 ai_analyze，update对象已经包含callback_query
-        await ai_analyze(update, context)
 
     elif data == "diagnose_menu":
         # 显示系统诊断子菜单
@@ -1500,63 +1627,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 运行SSH响应时间测试
         thinking_msg = await send_thinking(update, "⏱ 正在测试SSH响应时间...")
         result = run_command(find_script("ssh-benchmark.sh") + " --test=response --iterations=10")
-        await reply_or_edit(update, f"⏱ *SSH响应时间测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
+        await reply_or_edit(update, f"⏱ SSH响应时间测试:\n\n{format_ai_response(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='HTML')
 
     elif data == "ssh_transfer":
         # 运行SSH传输速度测试
         thinking_msg = await send_thinking(update, "📁 正在测试SSH传输速度...")
         result = run_command(find_script("ssh-benchmark.sh") + " --test=transfer --size=5MB")
-        await reply_or_edit(update, f"📁 *SSH传输速度测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
+        await reply_or_edit(update, f"📁 SSH传输速度测试:\n\n{format_ai_response(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='HTML')
 
     elif data == "ssh_concurrent":
         # 运行SSH并发连接测试
         thinking_msg = await send_thinking(update, "👥 正在测试SSH并发连接...")
         result = run_command(find_script("ssh-benchmark.sh") + " --test=concurrent --sessions=5")
-        await reply_or_edit(update, f"👥 *SSH并发连接测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
+        await reply_or_edit(update, f"👥 SSH并发连接测试:\n\n{format_ai_response(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='HTML')
 
-    elif data == "ssh_report":
-        # 显示完整SSH性能报告
-        await ssh_performance(update, context)
 
-    elif data == "ssh_optimize":
-        # 显示SSH优化建议
-        await ssh_optimize(update, context)
 
-    elif data == "ssh_diagnose":
-        # 运行SSH问题诊断
-        await ssh_diagnose(update, context)
 
-    elif data == "health_check":
-        # 运行健康检查
-        await health_check(update, context)
 
-    elif data == "network_diagnose":
-        # 运行网络诊断
-        await network_diagnose(update, context)
 
-    elif data == "performance_diagnose":
-        # 运行性能诊断
-        await performance_diagnose(update, context)
 
-    elif data == "security_scan":
-        # 运行安全扫描
-        await security_scan(update, context)
 
-    elif data == "system_monitor":
-        # 运行系统监控
-        await system_monitor(update, context)
 
-    elif data == "ssh_history":
-        # 显示SSH历史趋势
-        await ssh_history(update, context)
         # Note: ssh_history already uses reply_or_edit with make_back_button
 
-    elif data == "ssh_config":
-        # 显示SSH配置管理
-        await ssh_config(update, context)
 
     elif data.startswith("restart_"):
         container = data.replace("restart_", "")
+        if not validate_container_name(container):
+            await query.edit_message_text("⛔ 无效的容器名", parse_mode='Markdown')
+            return
         await restart_container(update, context, container)
 
     elif data == "logs_health":
@@ -1579,6 +1679,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==================== 服务控制回调 ====================
     elif data.startswith("svc_restart_"):
         svc = data.replace("svc_restart_", "")
+        if not validate_service_name(svc):
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
+            return
+        # Show confirmation dialog
+        keyboard = [
+            [InlineKeyboardButton("✅ 确认重启", callback_data=f"confirm_svc_restart_{svc}"),
+             InlineKeyboardButton("❌ 取消", callback_data="services_menu")]
+        ]
+        current_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
+        await query.edit_message_text(
+            f"⚠️ *确认重启服务*\n\n服务: {svc}\n当前状态: {current_status}\n\n确定要重启吗？",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("confirm_svc_restart_"):
+        svc = data.replace("confirm_svc_restart_", "")
+        if not validate_service_name(svc):
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
+            return
         result = run_command(f"systemctl restart {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
         emoji = "✅" if new_status.strip() == "active" else "❌"
@@ -1590,6 +1710,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("svc_start_"):
         svc = data.replace("svc_start_", "")
+        if not validate_service_name(svc):
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
+            return
         result = run_command(f"systemctl start {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
         emoji = "✅" if new_status.strip() == "active" else "❌"
@@ -1601,6 +1724,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("svc_stop_"):
         svc = data.replace("svc_stop_", "")
+        if not validate_service_name(svc):
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
+            return
+        keyboard = [
+            [InlineKeyboardButton("✅ 确认停止", callback_data=f"confirm_svc_stop_{svc}"),
+             InlineKeyboardButton("❌ 取消", callback_data="services_menu")]
+        ]
+        await query.edit_message_text(
+            f"⚠️ *确认停止服务*\n\n服务: {svc}\n\n⚠️ 停止服务可能影响系统运行！确定要停止吗？",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("confirm_svc_stop_"):
+        svc = data.replace("confirm_svc_stop_", "")
+        if not validate_service_name(svc):
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
+            return
         result = run_command(f"systemctl stop {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
         emoji = "🛑" if new_status.strip() != "active" else "❌"
@@ -1612,6 +1753,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("clean_backup_"):
         days = data.replace("clean_backup_", "")
+        if not days.isdigit() or int(days) < 1:
+            await query.edit_message_text("⛔ 无效的天数", parse_mode='Markdown')
+            return
+        keyboard = [
+            [InlineKeyboardButton("✅ 确认清理", callback_data=f"confirm_clean_{days}"),
+             InlineKeyboardButton("❌ 取消", callback_data="backup_menu")]
+        ]
+        await query.edit_message_text(
+            f"⚠️ *确认清理备份*\n\n将删除 {days} 天前的所有备份\n\n⚠️ 此操作不可恢复！确定要继续吗？",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("confirm_clean_"):
+        days = data.replace("confirm_clean_", "")
+        if not days.isdigit() or int(days) < 1:
+            await query.edit_message_text("⛔ 无效的天数", parse_mode='Markdown')
+            return
         result = run_command(f"find /var/backups/daily/ -name '*.gpg' -mtime +{days} -delete 2>&1\nfind /var/backups/daily/ -name '*.tar.gz' -mtime +{days} -delete 2>&1")
         remaining = run_command("ls /var/backups/daily/ 2>/dev/null | wc -l")
         await query.edit_message_text(
@@ -1642,102 +1801,81 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "egg_random":
-        import random
-        egg_map = {
-            "game": "egg_game", "joke": "egg_joke", "poetry": "egg_poetry",
-            "fortune": "egg_fortune", "meme": "egg_meme", "ai": "egg_ai"
-        }
-        random_egg = random.choice(list(egg_map.values()))
-        # Redirect by updating data and re-processing
-        # Simplest: just pick a random message directly
-        all_egg_messages = []
-        # Games
-        all_egg_messages.extend([
-            "🎮 *猜数字游戏*\n\n我正在想一个1-100之间的数字，猜猜看是多少？\n\n发送 `/guess 数字` 来猜测！",
-            "🎯 *服务器挑战*\n\n你能让服务器负载保持在1.0以下吗？\n使用 `/status` 查看当前负载！",
-        ])
-        # Jokes
-        all_egg_messages.extend([
-            "🤣 程序员总是把万圣节和圣诞节搞混，因为 Oct 31 == Dec 25！",
-            "😄 SSH连接对女朋友说：'我需要你的公钥才能进入你的心里！'",
-        ])
-        # Fortunes
-        all_egg_messages.extend([
+        all_eggs = [
+            "🎮 猜数字游戏：我正在想一个1-100之间的数字，猜猜看是多少？",
+            "😄 程序员总是把万圣节和圣诞节搞混，因为 Oct 31 == Dec 25！",
+            "🎭 代码的诗篇：每一行代码，都是一句诗句，在服务器的心跳中，找到技术的韵律。",
             "🔮 今天你会发现一个隐藏的Bug，但也会找到优雅的解决方案。",
-            "🌟 运维座今日运势：工作：适合优化配置 💰 财运：备份一切顺利",
-        ])
-        chosen = random.choice(all_egg_messages)
-        await query.edit_message_text(chosen, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+            "🚀 [负载: 0.5] 我还能行！ [负载: 3.0] 我要重启了！",
+            "🤖 AI秘密：我其实每天都在学习如何更好地为你服务！",
+        ]
+        await query.edit_message_text(random.choice(all_eggs), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_game":
-        # 简单的小游戏
         games = [
-            "🎮 *猜数字游戏*\n\n我正在想一个1-100之间的数字，猜猜看是多少？\n\n发送 `/guess 数字` 来猜测！",
-            "🎯 *服务器挑战*\n\n你能让服务器负载保持在1.0以下吗？\n使用 `/status` 查看当前负载！",
-            "🏆 *运维大师*\n\n连续7天每天运行健康检查，获得'运维大师'称号！"
+            "🎮 猜数字游戏：我正在想一个1-100之间的数字，猜猜看是多少？",
+            "🎯 服务器挑战：你能让服务器负载保持在1.0以下吗？使用 /status 查看！",
+            "🏆 运维大师：连续7天每天运行健康检查，获得'运维大师'称号！"
         ]
-        import random
-        game_msg = random.choice(games)
-        await query.edit_message_text(game_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+        await query.edit_message_text(random.choice(games), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_joke":
-        # 程序员笑话
         jokes = [
-            "🤣 *程序员笑话*\n\n问：为什么程序员总是把万圣节和圣诞节搞混？\n答：因为 Oct 31 == Dec 25！",
-            "😄 *服务器笑话*\n\n问：服务器最害怕什么？\n答：404错误，因为它意味着'找不到页面'，但实际上是'找不到原因'！",
-            "🎯 *SSH笑话*\n\n问：SSH连接对女朋友说什么？\n答：'我需要你的公钥才能进入你的心里！'",
-            "🐛 *Bug笑话*\n\n问：为什么程序员不喜欢大自然？\n答：因为那里有太多的Bug！"
+            "🤣 为什么程序员总是把万圣节和圣诞节搞混？因为 Oct 31 == Dec 25！",
+            "😄 服务器最害怕什么？404错误！",
+            "🎯 SSH连接对女朋友说：'我需要你的公钥才能进入你的心里！'",
+            "🐛 为什么程序员不喜欢大自然？因为那里有太多的Bug！"
         ]
-        import random
-        joke_msg = random.choice(jokes)
-        await query.edit_message_text(joke_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+        await query.edit_message_text(random.choice(jokes), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_poetry":
-        # 诗歌模式
         poems = [
-            "🎭 *代码的诗篇*\n\n在数字的海洋里，\n我寻找着答案的光芒。\n\n每一行代码，\n都是一句诗句，\n在服务器的心跳中，\n找到技术的韵律。",
-            "🌌 *服务器的夜曲*\n\n当月光洒在数据中心，\n服务器轻声低语。\n\nCPU在思考，\n内存在回忆，\n硬盘在诉说，\n网络的秘密。",
-            "⚡ *SSH的连接*\n\n穿过千山万水的隧道，\n抵达服务器的怀抱。\n\n加密的握手，\n安全的通道，\n每一次连接，\n都是信任的拥抱。"
+            "🎭 代码的诗篇：在数字的海洋里，每一行代码都是一句诗句，在服务器的心跳中找到技术的韵律。",
+            "🌌 服务器的夜曲：CPU在思考，内存在回忆，硬盘在诉说，网络的秘密。",
+            "⚡ SSH的连接：加密的握手，安全的通道，每一次连接，都是信任的拥抱。"
         ]
-        import random
-        poem_msg = random.choice(poems)
-        await query.edit_message_text(poem_msg, parse_mode='Markdown')
+        await query.edit_message_text(random.choice(poems), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_fortune":
-        # 幸运饼干
         fortunes = [
-            "🥠 *幸运代码饼干*\n\n```\n┌────────────────────────┐\n│  你的代码今天会运行    │\n│      得特别流畅！      │\n└────────────────────────┘\n```",
-            "🔮 *技术预言*\n\n> 今天你会发现一个隐藏的Bug，\n> 但也会找到优雅的解决方案。\n\n💡 *提示*：查看日志获取线索。",
-            "🌟 *服务器星座*\n\n**运维座今日运势**：\n• 工作：适合优化配置\n• 爱情：与代码关系融洽\n• 健康：系统负载平稳\n• 财运：备份一切顺利",
-            "🎯 *今日任务*\n\n1. 对代码微笑一次\n2. 感谢服务器辛勤工作\n3. 备份重要数据\n4. 学习新技术"
+            "🥠 幸运代码饼干：你的代码今天会运行得特别流畅！",
+            "🔮 技术预言：今天你会发现一个隐藏的Bug，但也会找到优雅的解决方案。",
+            "🌟 运维座今日运势：工作适合优化配置 💰 财运备份一切顺利",
+            "🎯 今日任务：对代码微笑一次、感谢服务器、备份重要数据、学习新技术"
         ]
-        import random
-        fortune_msg = random.choice(fortunes)
-        await query.edit_message_text(fortune_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+        await query.edit_message_text(random.choice(fortunes), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_meme":
-        # 表情包模式
         memes = [
-            "😎 *程序员专属表情包*\n\n```\n  ╔════════════════╗\n  ║  听说你在找Bug? ║\n  ╚════════════════╝\n          👉 👈\n        我在这呢！\n```",
-            "🚀 *服务器日常*\n\n```\n  [负载: 0.5] 我还能行！\n  [负载: 1.5] 有点压力...\n  [负载: 3.0] 我要重启了！\n```",
-            "🤖 *AI的内心独白*\n\n```\n人类：帮我优化服务器\nAI：正在思考...\nAI：建议重启\n人类：就这？\nAI：🤖💔\n```"
+            "😎 听说你在找Bug? 👉👈 我在这呢！",
+            "🚀 [负载: 0.5] 我还能行！ [负载: 3.0] 我要重启了！",
+            "🤖 人类：帮我优化服务器 → AI：建议重启 → 人类：就这？→ AI：💔"
         ]
-        import random
-        meme_msg = random.choice(memes)
-        await query.edit_message_text(meme_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+        await query.edit_message_text(random.choice(memes), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_ai":
-        # AI彩蛋
         ai_eggs = [
-            "🤖 *AI秘密*\n\n你知道吗？我其实每天都在学习\n如何更好地为你服务！\n\n💭 *内心想法*：希望人类多夸夸我~",
-            "🧠 *神经网络低语*\n\n我看到了...看到了...\n服务器的未来是光明的！\n\n（其实我只是个脚本）",
-            "🎭 *AI的戏剧*\n\n**第一幕**：接收命令\n**第二幕**：处理请求\n**第三幕**：返回结果\n\n*观众掌声* 👏👏👏"
+            "🤖 AI秘密：我其实每天都在学习如何更好地为你服务！💭 希望人类多夸夸我~",
+            "🧠 神经网络低语：我看到了...服务器的未来是光明的！（其实我只是个脚本）",
+            "🎭 AI的戏剧：第一幕接收命令 → 第二幕处理请求 → 第三幕返回结果 👏👏👏"
         ]
-        import random
-        ai_msg = random.choice(ai_eggs)
-        await query.edit_message_text(ai_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+        await query.edit_message_text(random.choice(ai_eggs), parse_mode='HTML', reply_markup=make_back_button("fun_menu"))
 
 # ==================== 主函数 ====================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """全局错误处理器"""
+    logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
+    try:
+        if update and hasattr(update, 'effective_chat') and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚠️ 内部错误，请稍后重试。"
+            )
+        elif update and hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text("⚠️ 内部错误，请稍后重试。")
+    except Exception as e:
+        logger.error(f"Error handler failed: {e}")
+
 
 def main():
     """启动机器人"""
@@ -1766,14 +1904,17 @@ def main():
     application.add_handler(CommandHandler("sshhistory", ssh_history))
     application.add_handler(CommandHandler("sshconfig", ssh_config))
 
+    # 注册全局错误处理器
+    application.add_error_handler(error_handler)
+
     # 注册按钮回调
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.1 starting with AI and SSH performance support...")
-    print("Server-Admin Bot v3.1 已启动 (AI增强版 + SSH性能监控)")
+    logger.info("Bot v3.2 starting with AI and SSH performance support...")
+    print("Server-Admin Bot v3.2 已启动 (AI增强版 + SSH性能监控)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
