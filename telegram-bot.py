@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.8
+Server-Admin Telegram Bot v3.9
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警 + 智能日志
 
 命令菜单:
@@ -700,7 +700,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         
         # 没有指定服务，询问用户
-        await update.message.reply_text("🔄 请指定要重启的服务或容器，例如：\n• 重启 nginx\n• 重启 docker\n• 重启 ssh", parse_mode='HTML')
+        keyboard = [[InlineKeyboardButton("🔙 主菜单", callback_data="start")]]
+        await update.message.reply_text("🔄 请指定要重启的服务或容器，例如：\n• 重启 nginx\n• 重启 docker\n• 重启 ssh", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         return
     
     # 查看状态
@@ -726,19 +727,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 磁盘空间
     if any(kw in msg_lower for kw in ['磁盘', 'disk', '空间', '容量']):
         disk_info = run_command("df -h")
-        await update.message.reply_text(f"💿 <b>磁盘使用情况</b>\n\n<pre>{disk_info}</pre>", parse_mode='HTML')
+        keyboard = [[InlineKeyboardButton("🔙 主菜单", callback_data="start")]]
+        await update.message.reply_text(f"💿 <b>磁盘使用情况</b>\n\n<pre>{disk_info}</pre>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         return
     
     # 内存使用
     if any(kw in msg_lower for kw in ['内存', 'memory', 'ram']):
         mem_info = run_command("free -h")
-        await update.message.reply_text(f"💾 <b>内存使用情况</b>\n\n<pre>{mem_info}</pre>", parse_mode='HTML')
+        keyboard = [[InlineKeyboardButton("🔙 主菜单", callback_data="start")]]
+        await update.message.reply_text(f"💾 <b>内存使用情况</b>\n\n<pre>{mem_info}</pre>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         return
     
     # Docker 容器
     if any(kw in msg_lower for kw in ['容器', 'container', 'docker']):
         containers = run_command("docker ps -a --format 'table {{.Names}}\\t{{.Status}}'")
-        await update.message.reply_text(f"🐳 <b>Docker 容器</b>\n\n<pre>{containers}</pre>", parse_mode='HTML')
+        keyboard = [[InlineKeyboardButton("🔙 主菜单", callback_data="start")]]
+        await update.message.reply_text(f"🐳 <b>Docker 容器</b>\n\n<pre>{containers}</pre>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    
+    # 显示主菜单
+    if any(kw in msg_lower for kw in ['菜单', 'menu', '主菜单', '功能', '帮助']):
+        await update.message.reply_text(build_welcome_message(), parse_mode='HTML', reply_markup=build_main_keyboard())
         return
 
     # ========== 未识别指令，走 AI 对话 ==========
@@ -768,7 +777,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 转义Markdown避免解析错误
     escaped_response = format_ai_response(response)
-    await thinking_msg.edit_text(f"🤖 {escaped_response}", parse_mode='HTML')
+    
+    # 添加返回主菜单提示
+    keyboard = [[InlineKeyboardButton("🔙 主菜单", callback_data="start")]]
+    await thinking_msg.edit_text(f"🤖 {escaped_response}\n\n💡 输入「菜单」返回主菜单", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     logger.info(f"Message handled: {user_message[:50]}...")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -987,6 +999,42 @@ Docker 日志（最近错误）:
     except Exception as e:
         logger.error(f"Log analysis error: {e}")
         await reply_or_edit(update, f"⚠️ 分析失败: {str(e)}", parse_mode='HTML')
+
+async def cron_manager(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """定时任务管理（查看当前 cron）"""
+    if not authorized(update):
+        return
+    
+    # 获取当前用户的 cron
+    cron_list = run_command("crontab -l 2>/dev/null || echo '无定时任务'")
+    
+    # 获取系统级监控 cron
+    system_cron = run_command("ls /etc/cron.d/ 2>/dev/null | grep -E 'monitor|backup|health' || echo '无系统监控任务'")
+    
+    report = f"""⚙️ <b>定时任务管理</b>
+
+📅 <b>用户定时任务</b>:
+<pre>{cron_list}</pre>
+
+🔧 <b>系统监控任务</b>:
+<pre>{system_cron}</pre>
+
+💡 <b>常用定时任务</b>:
+• 每日备份: 0 2 * * * /usr/local/sbin/monitoring/backup.sh
+• 健康检查: */5 * * * * /usr/local/sbin/monitoring/health-check.sh
+• 日志清理: 0 3 * * 0 find /var/log -name "*.log" -mtime +30 -delete
+
+⚠️ 添加任务需手动执行: crontab -e
+或请 AI 帮你生成 cron 表达式
+"""
+    
+    keyboard = [
+        [InlineKeyboardButton("🤖 AI 生成 cron", callback_data="ai_cron_help"),
+         InlineKeyboardButton("🔄 刷新", callback_data="cron_manager")],
+        [InlineKeyboardButton("🔙 主菜单", callback_data="start")]
+    ]
+    
+    await reply_or_edit(update, report, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看操作历史（支持分页）"""
@@ -1685,18 +1733,19 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🔧 服务管理", callback_data="services_menu")],
         [InlineKeyboardButton("📋 日志查看", callback_data="logs"),
          InlineKeyboardButton("💾 备份管理", callback_data="backup_menu"),
-         InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu")],
-        [InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf"),
-         InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
-         InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu")],
-        [InlineKeyboardButton("🎉 趣味", callback_data="fun_menu"),
+         InlineKeyboardButton("⚙️ 定时任务", callback_data="cron_manager")],
+        [InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu"),
+         InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf"),
+         InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu")],
+        [InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
+         InlineKeyboardButton("🎉 趣味", callback_data="fun_menu"),
          InlineKeyboardButton("❓ 帮助", callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.8</b>
+    return """🤖 <b>Server-Admin Bot v3.9</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1713,19 +1762,19 @@ def build_welcome_message() -> str:
 /backup - 手动备份
 /restart - 重启容器
 /ai - AI智能对话
-/analyze - AI系统分析
+/cron - 定时任务管理
 
-<b>SSH性能监控</b>:
-/sshstatus - SSH服务状态
-/sshperformance - SSH性能测试
-/sshoptimize - SSH优化建议
-/sshdiagnose - SSH问题诊断
+<b>自然语言交互</b>:
+• "重启 nginx" → 自动重启容器
+• "查看状态" → 显示系统状态
+• "磁盘空间" → 显示磁盘使用
+• "帮我备份" → 执行备份
+• "菜单" → 显示主菜单
 
 <b>快捷操作</b>:
-直接发送消息即可与 AI 对话
 点击按钮使用交互式菜单
-使用 /help 查看完整命令列表
-点击 🎉 趣味 按钮发现隐藏彩蛋"""
+输入「菜单」或「主菜单」返回这里
+点击 🔙 返回 按钮←上一级菜单"""
 
 # 监控的服务列表（统一常量）
 MONITORED_SERVICES = ["ssh", "docker", "fail2ban", "tailscaled"]
@@ -1749,6 +1798,7 @@ CALLBACK_ROUTES = {
     "ai_analyze": ai_analyze,
     "quick_diagnose": quick_diagnose,
     "analyze_logs": analyze_logs,
+    "cron_manager": cron_manager,
     "ssh_report": ssh_performance,
     "ssh_optimize": ssh_optimize,
     "ssh_diagnose": ssh_diagnose,
@@ -2425,6 +2475,7 @@ def main():
     application.add_handler(CommandHandler("analyze", ai_analyze))
     application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("analyze_logs", analyze_logs))
+    application.add_handler(CommandHandler("cron", cron_manager))
     application.add_handler(CommandHandler("help", help_cmd))
     # SSH性能命令
     application.add_handler(CommandHandler("sshstatus", ssh_status))
@@ -2443,8 +2494,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.8 starting with AI, SSH performance, and alert monitoring...")
-    print("Server-Admin Bot v3.8 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
+    logger.info("Bot v3.9 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v3.9 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
