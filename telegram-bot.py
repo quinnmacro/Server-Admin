@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.5
+Server-Admin Telegram Bot v3.6
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警
 
 命令菜单:
@@ -143,6 +143,62 @@ def status_emoji(status: str) -> str:
 
 import threading
 import time as time_module
+import sqlite3
+from pathlib import Path
+
+# 历史记录数据库
+HISTORY_DB = Path.home() / ".hermes" / "bot_history.db"
+
+def init_history_db():
+    """初始化操作历史数据库"""
+    HISTORY_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(HISTORY_DB)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS operations
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  operation TEXT NOT NULL,
+                  target TEXT,
+                  user TEXT,
+                  result TEXT,
+                  details TEXT)''')
+    conn.commit()
+    conn.close()
+
+def log_operation(operation: str, target: str = "", user: str = "telegram", result: str = "success", details: str = ""):
+    """记录操作到历史"""
+    try:
+        conn = sqlite3.connect(HISTORY_DB)
+        c = conn.cursor()
+        c.execute("""INSERT INTO operations (operation, target, user, result, details)
+                     VALUES (?, ?, ?, ?, ?)""", (operation, target, user, result, details))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to log operation: {e}")
+
+def get_recent_operations(limit: int = 20, operation_type: str = None) -> list:
+    """获取最近的操作历史"""
+    try:
+        conn = sqlite3.connect(HISTORY_DB)
+        c = conn.cursor()
+        if operation_type:
+            c.execute("""SELECT timestamp, operation, target, result, details 
+                         FROM operations WHERE operation = ? 
+                         ORDER BY timestamp DESC LIMIT ?""", (operation_type, limit))
+        else:
+            c.execute("""SELECT timestamp, operation, target, result, details 
+                         FROM operations 
+                         ORDER BY timestamp DESC LIMIT ?""", (limit,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Failed to get operations: {e}")
+        return []
+
+# 初始化数据库
+init_history_db()
 
 # 告警阈值配置
 ALERT_THRESHOLDS = {
@@ -713,6 +769,9 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 异步执行备份
     run_command(find_script("backup.sh") + " &")
     logger.info("Backup command executed")
+    
+    # 记录操作历史
+    log_operation("backup", "manual", result="started")
 
 async def restart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """重启菜单"""
@@ -743,6 +802,42 @@ async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     msg = f"✅ *容器已重启*\n\n`{container}`\n\n结果: {result}"
     await update.callback_query.edit_message_text(msg, parse_mode='Markdown')
     logger.info(f"Container {container} restarted")
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看操作历史"""
+    if not authorized(update):
+        return
+    
+    # 获取最近 20 条操作
+    operations = get_recent_operations(limit=20)
+    
+    if not operations:
+        await reply_or_edit(update, "📝 <b>操作历史</b>\n\n暂无操作记录", parse_mode='HTML')
+        return
+    
+    # 构建历史列表
+    lines = ["📝 <b>操作历史</b>\n"]
+    for ts, op, target, result, details in operations:
+        # 格式化时间
+        time_str = ts.split('.')[0] if '.' in ts else ts
+        # 状态图标
+        icon = "✅" if result == "success" else "❌"
+        # 操作行
+        line = f"{icon} <i>{time_str}</i> {op}"
+        if target:
+            line += f" → <b>{target}</b>"
+        lines.append(line)
+    
+    # 添加过滤按钮
+    keyboard = [
+        [InlineKeyboardButton("🔄 重启操作", callback_data="history_restart"),
+         InlineKeyboardButton("💾 备份操作", callback_data="history_backup")],
+        [InlineKeyboardButton("🔧 服务操作", callback_data="history_service"),
+         InlineKeyboardButton("📊 全部", callback_data="history_all")],
+        [InlineKeyboardButton("🔙 主菜单", callback_data="start")]
+    ]
+    
+    await reply_or_edit(update, '\n'.join(lines), parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """帮助信息"""
@@ -1401,7 +1496,7 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.5</b>
+    return """🤖 <b>Server-Admin Bot v3.6</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1485,6 +1580,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML',
             reply_markup=build_main_keyboard()
         )
+    
+    # 历史过滤回调
+    elif data.startswith("history_"):
+        filter_type = data.replace("history_", "")
+        operation_map = {
+            "restart": "restart",
+            "backup": "backup",
+            "service": "service",
+            "all": None
+        }
+        operation_type = operation_map.get(filter_type)
+        operations = get_recent_operations(limit=20, operation_type=operation_type)
+        
+        if not operations:
+            await query.edit_message_text("📝 <b>操作历史</b>\n\n暂无记录", parse_mode='HTML')
+            return
+        
+        lines = [f"📝 <b>操作历史</b> ({filter_type})\n"]
+        for ts, op, target, result, details in operations:
+            time_str = ts.split('.')[0] if '.' in ts else ts
+            icon = "✅" if result == "success" else "❌"
+            line = f"{icon} <i>{time_str}</i> {op}"
+            if target:
+                line += f" → <b>{target}</b>"
+            lines.append(line)
+        
+        await query.edit_message_text('\n'.join(lines), parse_mode='HTML')
 
 
     elif data == "services_menu":
@@ -1866,6 +1988,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = run_command(f"systemctl restart {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
         emoji = "✅" if new_status.strip() == "active" else "❌"
+        
+        # 记录操作历史
+        log_operation("restart_service", svc, result=new_status.strip(), details=result[:100])
+        
         await query.edit_message_text(
             f"🔄 *服务重启结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
             parse_mode='Markdown',
@@ -2064,6 +2190,7 @@ def main():
     application.add_handler(CommandHandler("restart", restart_menu))
     application.add_handler(CommandHandler("ai", ai_chat))
     application.add_handler(CommandHandler("analyze", ai_analyze))
+    application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     # SSH性能命令
     application.add_handler(CommandHandler("sshstatus", ssh_status))
@@ -2082,8 +2209,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.5 starting with AI, SSH performance, and alert monitoring...")
-    print("Server-Admin Bot v3.5 已启动 (AI增强 + SSH性能 + 主动告警)")
+    logger.info("Bot v3.6 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v3.6 已启动 (AI增强 + SSH性能 + 主动告警)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
