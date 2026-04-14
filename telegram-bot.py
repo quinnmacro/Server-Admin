@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.3
-交互式服务器管理机器人 + AI 智能助手 + SSH性能监控
+Server-Admin Telegram Bot v3.4
+交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断
 
 命令菜单:
 - /start  - 欢迎信息和主菜单
@@ -208,81 +208,6 @@ def format_ai_response(text: str) -> str:
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
     return text
-
-
-# ==================== Telegram 表格/列表格式化工具 ====================
-
-def status_emoji(status: str) -> str:
-    """服务状态 → emoji 指示灯"""
-    s = status.strip().lower()
-    if s in ('active', 'running', 'yes', 'enabled', 'up'):
-        return '🟢'
-    elif s in ('inactive', 'stopped', 'no', 'disabled', 'down'):
-        return '🔴'
-    elif s in ('failed', 'error', 'unknown', '未知'):
-        return '🟠'
-    else:
-        return '🟡'
-
-def fmt_svc_line(name: str, status: str, extra: str = '') -> str:
-    """格式化单行服务状态 — emoji + 加粗名称 + 状态 + 可选附加信息"""
-    emoji = status_emoji(status)
-    name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    status = status.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    line = f"{emoji} <b>{name}</b>: {status}"
-    if extra:
-        extra = extra.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        line += f"  <i>{extra}</i>"
-    return line
-
-def fmt_container_line(name: str, container_status: str) -> str:
-    """格式化容器状态行"""
-    if 'up' in container_status.lower():
-        emoji = '🟢'
-    elif 'exited' in container_status.lower() or 'stopped' in container_status.lower():
-        emoji = '🔴'
-    else:
-        emoji = '🟡'
-    # 提取 Up 时间
-    up_match = re.search(r'Up\s+(.+)', container_status, re.IGNORECASE)
-    up_info = up_match.group(1).strip() if up_match else container_status.strip()
-    # HTML 转义
-    name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    up_info = up_info.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return f"{emoji} <b>{name}</b>  ↳ <i>{up_info}</i>"
-
-def fmt_kv_section(title: str, items: list[tuple[str, str]], title_emoji: str = '') -> str:
-    """格式化键值对分组 — 用于诊断/安全扫描等"""
-    lines = [f"\n{title_emoji} <b>{title}</b>"]
-    for key, val in items:
-        # key 是我们控制的标签，val 来自 shell 输出需转义
-        val = val.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        lines.append(f"  ├ {key}: {val}")
-    return '\n'.join(lines)
-
-def fmt_shell_table(raw: str, max_lines: int = 15) -> str:
-    """将 shell 命令原始输出精简为 HTML 代码块（用于日志/复杂数据）"""
-    text = raw.strip()
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    lines = text.splitlines()
-    if len(lines) > max_lines:
-        kept = '\n'.join(lines[:max_lines])
-        return f"<pre>{kept}\n... ({len(lines) - max_lines} more lines)</pre>"
-    return f"<pre>{text}</pre>"
-
-def _fmt_containers(raw: str) -> str:
-    """格式化 docker ps 输出为结构化列表"""
-    if not raw.strip() or 'Docker未运行' in raw or '无运行' in raw:
-        return f"  {status_emoji('unknown')} Docker 未运行"
-    lines = []
-    for line in raw.strip().splitlines():
-        if ':' in line:
-            parts = line.split(':', 1)
-            lines.append(fmt_container_line(parts[0].strip(), parts[1].strip()))
-        elif line.strip():
-            safe = line.strip().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            lines.append(f"🟡 {safe}")
-    return '\n'.join(lines)
 
 # 从配置文件读取
 def load_config():
@@ -603,46 +528,40 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     status_msg = (
-        f"📊 <b>服务器状态</b>\n\n"
-        f"⏱ 运行时间: <b>{uptime}</b>\n"
-        f"💾 内存: <b>{mem}</b>\n"
-        f"💿 磁盘: <b>{disk}</b>\n"
-        f"📈 负载: <b>{load}</b>\n\n"
-        f"🐳 <b>容器状态</b>:\n{_fmt_containers(containers)}"
+        f"📊 *服务器状态*\n\n"
+        f"⏱ *运行时间*: {uptime}\n"
+        f"💾 *内存*: {mem}\n"
+        f"💿 *磁盘*: {disk}\n"
+        f"📈 *负载*: {load}\n\n"
+        f"🐳 *容器状态*:\n```\n{containers}\n```"
     )
 
-    await reply_or_edit(update, status_msg, parse_mode='HTML')
+    await reply_or_edit(update, status_msg, parse_mode='Markdown')
     logger.info("Status command executed")
 
 async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """服务列表 — 结构化 HTML 格式"""
+    """服务列表"""
     if not authorized(update):
         return
 
-    # 并行获取服务状态
-    svc_names = ["ssh", "docker", "fail2ban", "tailscaled", "cron", "rsyslog"]
-    cmds = [(f"systemctl is-active {s} 2>/dev/null || echo 未知", 5) for s in svc_names]
-    svc_statuses = await arun_commands(*cmds)
+    services_list = run_command("""
+        echo "=== 系统服务 ==="
+        for svc in ssh docker fail2ban tailscaled; do
+            status=$(systemctl is-active $svc 2>/dev/null || echo "未知")
+            echo "$svc: $status"
+        done
+        echo ""
+        echo "=== Docker 容器 ==="
+        docker ps --format "{{.Names}}: {{.Status}}" 2>/dev/null || echo "无运行容器"
+    """)
 
-    # Docker 容器
-    containers_raw = run_command(
-        "docker ps --format '{{.Names}}|||{{.Status}}' 2>/dev/null || echo ''"
-    )
+    msg = f"""🔧 *服务列表*
 
-    # 构建 HTML 消息
-    lines = ["🔧 <b>服务列表</b>\n"]
-    lines.append("📦 <b>系统服务</b>")
-    for name, status in zip(svc_names, svc_statuses):
-        lines.append(fmt_svc_line(name, status.strip()))
+```
+{services_list}
+```"""
 
-    if containers_raw.strip():
-        lines.append("\n🐳 <b>Docker 容器</b>")
-        for line in containers_raw.strip().splitlines():
-            if '|||' in line:
-                cname, cstatus = line.split('|||', 1)
-                lines.append(fmt_container_line(cname.strip(), cstatus.strip()))
-
-    await reply_or_edit(update, '\n'.join(lines), parse_mode='HTML')
+    await reply_or_edit(update, msg, parse_mode='Markdown')
 
 async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看日志"""
@@ -838,22 +757,21 @@ async def ssh_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     opt_status = '✅ 已优化' if _perf_conf.strip() == 'yes' else '❌ 未优化'
-    _svc_e = status_emoji(_svc)
     status_msg = (
-        f"🔐 <b>SSH服务状态</b>\n\n"
-        f"{_svc_e} 服务状态: <b>{_svc}</b>\n"
+        f"🔐 *SSH服务状态*\n\n"
+        f"🟢 服务状态: {_svc}\n"
         f"⏱ 运行时间: {_uptime}\n"
-        f"👥 活动连接: <b>{_conns}</b> 个\n"
+        f"👥 活动连接: {_conns} 个\n"
         f"💾 内存使用: {_mem}\n"
-        f"⏱ 响应时间: <b>{_resp}</b>\n\n"
-        f"📊 <b>性能指标</b>\n"
-        f"  ├ MaxSessions: {_maxsess}\n"
-        f"  ├ UseDNS: {_usedns}\n"
-        f"  └ Compression: {_comp}\n\n"
+        f"⏱ 响应时间: {_resp}\n\n"
+        f"📊 性能指标:\n"
+        f"• MaxSessions: {_maxsess}\n"
+        f"• UseDNS: {_usedns}\n"
+        f"• Compression: {_comp}\n\n"
         f"🔧 优化状态: {opt_status}"
     )
 
-    await reply_or_edit(update, status_msg, parse_mode='HTML')
+    await reply_or_edit(update, status_msg, parse_mode='Markdown')
     logger.info("SSH status command executed")
 
 async def ssh_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -931,35 +849,30 @@ async def ssh_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     perf_status = '✅ 已部署' if _perf_deployed.strip() == 'yes' else '❌ 未部署'
     
     diagnostic_info = (
-        f"🔧 <b>SSH连接诊断报告</b>\n\n"
-        + fmt_kv_section("基本连接测试", [
-            ("SSH服务状态", f"{status_emoji(_ssh_svc)} {_ssh_svc}"),
-            ("SSH端口监听", _port_listen),
-            ("网络连通性", _local_conn),
-        ], "📊")
-        + fmt_kv_section("性能指标", [
-            ("连接建立时间", _conn_time),
-            ("活跃连接数", f"{_active} 个"),
-            ("SSH进程数", _procs),
-        ], "📈")
-        + fmt_kv_section("常见问题检查", [
-            ("Fail2ban状态", _f2b),
-            ("磁盘空间", _disk),
-            ("系统负载", _load),
-        ], "⚠️")
-        + fmt_kv_section("安全配置检查", [
-            ("PermitRootLogin", _permit_root),
-            ("PasswordAuthentication", _pwd_auth),
-            ("MaxAuthTries", _max_auth),
-        ], "🔒")
-        + fmt_kv_section("优化配置检查", [
-            ("性能配置", perf_status),
-            ("UseDNS", _usedns),
-            ("Compression", _comp),
-        ], "🎯")
+        f"🔧 *SSH连接诊断报告*\n\n"
+        f"📊 *基本连接测试:*\n"
+        f"• SSH服务状态: {_ssh_svc}\n"
+        f"• SSH端口监听: {_port_listen}\n"
+        f"• 网络连通性: {_local_conn}\n\n"
+        f"📈 *性能指标:*\n"
+        f"• 连接建立时间: {_conn_time}\n"
+        f"• 活跃连接数: {_active}\n"
+        f"• SSH进程数: {_procs}\n\n"
+        f"⚠️ *常见问题检查:*\n"
+        f"• Fail2ban状态: {_f2b}\n"
+        f"• 磁盘空间: {_disk}\n"
+        f"• 系统负载: {_load}\n\n"
+        f"🔒 *安全配置检查:*\n"
+        f"• PermitRootLogin: {_permit_root}\n"
+        f"• PasswordAuthentication: {_pwd_auth}\n"
+        f"• MaxAuthTries: {_max_auth}\n\n"
+        f"🎯 *优化配置检查:*\n"
+        f"• 性能配置: {perf_status}\n"
+        f"• UseDNS: {_usedns}\n"
+        f"• Compression: {_comp}"
     )
 
-    await reply_or_edit(update, diagnostic_info, parse_mode='HTML')
+    await reply_or_edit(update, diagnostic_info, parse_mode='Markdown')
     logger.info("SSH diagnose command executed")
 
 async def ssh_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1063,6 +976,54 @@ async def ssh_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 系统诊断功能 ====================
 
+async def quick_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """快速诊断 - 一键检查系统健康状态"""
+    if not authorized(update):
+        return
+    
+    processing_msg = await send_thinking(update, "🚀 正在快速诊断...")
+    
+    try:
+        _mem, _disk, _load, _docker, _ssh, _f2b = await arun_commands(
+            ("free -m | awk 'NR==2{printf \"%s/%s MB\", $3, $2}'", 5),
+            ("df -h / | awk 'NR==2{print $5}'", 5),
+            ("cat /proc/loadavg | awk '{print $1}'", 5),
+            ("docker ps -q 2>/dev/null | wc -l", 5),
+            ("systemctl is-active ssh", 5),
+            ("systemctl is-active fail2ban", 5),
+        )
+        
+        report = f"""🚀 <b>快速诊断报告</b>
+
+📊 <b>系统状态</b>:
+  ├ 内存: {_mem}
+  ├ 磁盘: {_disk}
+  ├ 负载: {_load}
+  └ Docker: {_docker} 个
+
+🔧 <b>服务状态</b>:
+  ├ SSH: {status_emoji(_ssh)} {_ssh}
+  └ Fail2ban: {status_emoji(_f2b)} {_f2b}
+"""
+        
+        if processing_msg:
+            try:
+                await processing_msg.delete()
+            except:
+                pass
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 详细诊断", callback_data="diagnose_menu"),
+             InlineKeyboardButton("🔄 刷新", callback_data="quick_diagnose")],
+            [InlineKeyboardButton("🔙 主菜单", callback_data="start")]
+        ]
+        
+        await reply_or_edit(update, report, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    except Exception as e:
+        logger.error(f"Quick diagnose error: {e}")
+        await reply_or_edit(update, f"⚠️ 诊断失败: {str(e)}", parse_mode='HTML')
+
 async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """运行系统健康检查"""
     if not authorized(update):
@@ -1115,23 +1076,26 @@ async def network_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _closewait = run_command("ss -tan | grep CLOSE-WAIT | wc -l")
     
     network_info = (
-        f"🌐 <b>网络诊断报告</b>\n\n"
-        + fmt_kv_section("网络连通性测试", [
-            ("本地回环", _loopback),
-            ("网关连通性", _gateway),
-            ("DNS解析测试", _dns),
-        ], "📡")
-        + fmt_kv_section("网络连接状态", [
-            ("活动TCP连接", f"{_tcp} 个"),
-            ("监听端口", f"{_listen} 个"),
-            ("TIME-WAIT", f"{_timewait} 个"),
-            ("CLOSE-WAIT", f"{_closewait} 个"),
-        ], "🔗")
-        + "\n\n📊 <b>网络接口</b>\n" + fmt_shell_table(_iface, max_lines=10)
-        + "\n\n🎯 <b>建议操作</b>\n  1. 检查网络配置\n  2. 验证防火墙规则\n  3. 测试外部连通性\n  4. 监控网络流量"
+        f"🌐 *网络诊断报告*\n\n"
+        f"📊 *网络接口信息:*\n```\n{_iface}\n```\n\n"
+        f"📡 *网络连通性测试:*\n"
+        f"• 本地回环: {_loopback}\n"
+        f"• 网关连通性: {_gateway}\n"
+        f"• DNS解析测试: {_dns}\n\n"
+        f"🔗 *网络连接状态:*\n"
+        f"• 活动TCP连接: {_tcp} 个\n"
+        f"• 监听端口: {_listen} 个\n\n"
+        f"🚨 *网络问题检查:*\n"
+        f"• TIME-WAIT: {_timewait} 个\n"
+        f"• CLOSE-WAIT: {_closewait} 个\n\n"
+        f"🎯 *建议操作:*\n"
+        f"1. 检查网络配置\n"
+        f"2. 验证防火墙规则\n"
+        f"3. 测试外部连通性\n"
+        f"4. 监控网络流量"
     )
 
-    await reply_or_edit(update, network_info, parse_mode='HTML')
+    await reply_or_edit(update, network_info, parse_mode='Markdown')
     logger.info("Network diagnose command executed")
 
 async def performance_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1150,30 +1114,27 @@ async def performance_diagnose(update: Update, context: ContextTypes.DEFAULT_TYP
     _dcount = run_command("docker ps -q 2>/dev/null | wc -l")
     _dstats = run_command("docker stats --no-stream 2>/dev/null | head -5 || echo 'Docker未运行'")
     
-    # 精简 free 输出
-    _mem_lines = _mem.strip().splitlines()
-    _mem_short = _mem_lines[1] if len(_mem_lines) >= 2 else _mem
-    
     performance_info = (
-        f"📊 <b>系统性能诊断报告</b>\n\n"
-        + fmt_kv_section("CPU和负载", [
-            ("CPU核心数", _nproc),
-            ("系统负载", _loadavg),
-            ("CPU使用率", _cpu),
-        ], "⚡")
-        + fmt_kv_section("磁盘IO", [
-            ("磁盘使用率", _disk),
-            ("Inode使用", _inode),
-        ], "💿")
-        + fmt_kv_section("容器性能", [
-            ("运行中容器", f"{_dcount} 个"),
-        ], "🐳")
-        + "\n\n💾 <b>内存使用</b>\n" + fmt_shell_table(_mem_short, max_lines=5)
-        + "\n\n🐳 <b>容器资源</b>\n" + fmt_shell_table(_dstats, max_lines=8)
-        + "\n\n📈 <b>性能建议</b>\n  1. 监控系统负载趋势\n  2. 检查内存泄漏\n  3. 优化磁盘IO\n  4. 调整容器资源限制"
+        f"📊 *系统性能诊断报告*\n\n"
+        f"⚡ *CPU和负载:*\n"
+        f"• CPU核心数: {_nproc}\n"
+        f"• 系统负载: {_loadavg}\n"
+        f"• CPU使用率: {_cpu}\n\n"
+        f"💾 *内存使用:*\n```\n{_mem}\n```\n\n"
+        f"💿 *磁盘IO:*\n"
+        f"• 磁盘使用率: {_disk}\n"
+        f"• Inode使用: {_inode}\n\n"
+        f"🐳 *容器性能:*\n"
+        f"• 运行中容器: {_dcount} 个\n"
+        f"• 容器资源使用:\n```\n{_dstats}\n```\n\n"
+        f"📈 *性能建议:*\n"
+        f"1. 监控系统负载趋势\n"
+        f"2. 检查内存泄漏\n"
+        f"3. 优化磁盘IO\n"
+        f"4. 调整容器资源限制"
     )
 
-    await reply_or_edit(update, performance_info, parse_mode='HTML')
+    await reply_or_edit(update, performance_info, parse_mode='Markdown')
     logger.info("Performance diagnose command executed")
 
 async def security_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1194,25 +1155,26 @@ async def security_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _f2b_banned = run_command("fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $4}' 2>/dev/null || echo '0'")
     
     security_info = (
-        f"🔒 <b>系统安全扫描报告</b>\n\n"
-        + fmt_kv_section("基本安全检查", [
-            ("SSH服务状态", f"{status_emoji(_ssh_active)} {_ssh_active}"),
-            ("Fail2ban状态", f"{status_emoji(_f2b_status)} {_f2b_status}"),
-            ("防火墙状态", _ufw_status),
-        ], "🛡️")
-        + fmt_kv_section("SSH安全配置", [
-            ("PermitRootLogin", _permit_root),
-            ("PasswordAuthentication", _pwd_auth),
-            ("MaxAuthTries", _max_auth),
-        ], "🔐")
-        + fmt_kv_section("安全监控", [
-            ("SSH失败尝试", f"{_ssh_fails} 次/小时"),
-            ("Fail2ban封禁IP", f"{_f2b_banned} 个"),
-        ], "📊")
-        + "\n\n🚨 <b>建议改进</b>\n  1. 定期更新系统\n  2. 监控异常登录\n  3. 强化SSH配置\n  4. 启用审计日志"
+        f"🔒 *系统安全扫描报告*\n\n"
+        f"🛡️ *基本安全检查:*\n"
+        f"• SSH服务状态: {_ssh_active}\n"
+        f"• Fail2ban状态: {_f2b_status}\n"
+        f"• 防火墙状态: {_ufw_status}\n\n"
+        f"🔐 *SSH安全配置:*\n"
+        f"• PermitRootLogin: {_permit_root}\n"
+        f"• PasswordAuthentication: {_pwd_auth}\n"
+        f"• MaxAuthTries: {_max_auth}\n\n"
+        f"📊 *安全监控:*\n"
+        f"• 最近SSH失败尝试: {_ssh_fails} 次/小时\n"
+        f"• Fail2ban封禁IP: {_f2b_banned} 个\n\n"
+        f"🚨 *建议改进:*\n"
+        f"1. 定期更新系统\n"
+        f"2. 监控异常登录\n"
+        f"3. 强化SSH配置\n"
+        f"4. 启用审计日志"
     )
 
-    await reply_or_edit(update, security_info, parse_mode='HTML')
+    await reply_or_edit(update, security_info, parse_mode='Markdown')
     logger.info("Security scan command executed")
 
 async def system_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1235,30 +1197,30 @@ async def system_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _f2b_svc = run_command("systemctl is-active fail2ban 2>/dev/null || echo '未知'")
     
     monitor_info = (
-        f"📈 <b>系统监控面板</b>\n\n"
-        f"🕐 实时状态 (更新于: {_now})\n\n"
-        + fmt_kv_section("资源使用", [
-            ("系统负载", _load),
-            ("内存使用", _mem),
-            ("磁盘使用", _disk),
-        ], "⚡")
-        + fmt_kv_section("网络状态", [
-            ("活动连接", f"{_conns} 个"),
-            ("SSH连接", f"{_ssh_conns} 个"),
-        ], "🔗")
-        + fmt_kv_section("容器状态", [
-            ("运行中", f"{_dockers} 个"),
-            ("总容器数", f"{_all_dockers} 个"),
-        ], "🐳")
-        + fmt_kv_section("服务状态", [
-            ("SSH", f"{status_emoji(_ssh_svc)} {_ssh_svc}"),
-            ("Docker", f"{status_emoji(_docker_svc)} {_docker_svc}"),
-            ("Fail2ban", f"{status_emoji(_f2b_svc)} {_f2b_svc}"),
-        ], "📊")
-        + "\n\n📋 <b>监控建议</b>\n  1. 设置告警阈值\n  2. 定期性能基准测试\n  3. 日志审计\n  4. 容量规划"
+        f"📈 *系统监控面板*\n\n"
+        f"🕐 *实时状态 (更新于: {_now})*\n\n"
+        f"⚡ *资源使用:*\n"
+        f"• 系统负载: {_load}\n"
+        f"• 内存使用: {_mem}\n"
+        f"• 磁盘使用: {_disk}\n\n"
+        f"🔗 *网络状态:*\n"
+        f"• 活动连接: {_conns} 个\n"
+        f"• SSH连接: {_ssh_conns} 个\n\n"
+        f"🐳 *容器状态:*\n"
+        f"• 运行中: {_dockers} 个\n"
+        f"• 总容器数: {_all_dockers} 个\n\n"
+        f"📊 *服务状态:*\n"
+        f"• SSH: {_ssh_svc}\n"
+        f"• Docker: {_docker_svc}\n"
+        f"• Fail2ban: {_f2b_svc}\n\n"
+        f"📋 *监控建议:*\n"
+        f"1. 设置告警阈值\n"
+        f"2. 定期性能基准测试\n"
+        f"3. 日志审计\n"
+        f"4. 容量规划"
     )
 
-    await reply_or_edit(update, monitor_info, parse_mode='HTML')
+    await reply_or_edit(update, monitor_info, parse_mode='Markdown')
     logger.info("System monitor command executed")
 
 
@@ -1309,22 +1271,23 @@ async def safe_send(update: Update, text: str, parse_mode='Markdown', reply_mark
 def build_main_keyboard() -> InlineKeyboardMarkup:
     """构建主菜单键盘"""
     keyboard = [
-        [InlineKeyboardButton("📊 系统状态", callback_data="status"),
-         InlineKeyboardButton("🔧 服务管理", callback_data="services_menu"),
-         InlineKeyboardButton("📋 日志查看", callback_data="logs")],
-        [InlineKeyboardButton("💾 备份管理", callback_data="backup_menu"),
-         InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu"),
-         InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
-        [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
-         InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
-         InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")],
-        [InlineKeyboardButton("❓ 帮助", callback_data="help")]
+        [InlineKeyboardButton("🚀 快速诊断", callback_data="quick_diagnose"),
+         InlineKeyboardButton("📊 系统状态", callback_data="status"),
+         InlineKeyboardButton("🔧 服务管理", callback_data="services_menu")],
+        [InlineKeyboardButton("📋 日志查看", callback_data="logs"),
+         InlineKeyboardButton("💾 备份管理", callback_data="backup_menu"),
+         InlineKeyboardButton("🔄 容器重启", callback_data="restart_menu")],
+        [InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf"),
+         InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
+         InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu")],
+        [InlineKeyboardButton("🎉 趣味", callback_data="fun_menu"),
+         InlineKeyboardButton("❓ 帮助", callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.3</b>
+    return """🤖 <b>Server-Admin Bot v3.4</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1375,6 +1338,7 @@ CALLBACK_ROUTES = {
     "restart_menu": restart_menu,
     "help": help_cmd,
     "ai_analyze": ai_analyze,
+    "quick_diagnose": quick_diagnose,
     "ssh_report": ssh_performance,
     "ssh_optimize": ssh_optimize,
     "ssh_diagnose": ssh_diagnose,
@@ -1421,8 +1385,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 返回", callback_data="start")]
         ]
         await query.edit_message_text(
-            "🔧 <b>服务管理</b>\n\n选择服务管理操作:",
-            parse_mode='HTML',
+            "🔧 *服务管理*\n\n选择服务管理操作:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(services_keyboard)
         )
 
@@ -1431,13 +1395,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         services_for_restart = MONITORED_SERVICES
         keyboard = []
         for svc in services_for_restart:
-            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo 未知")
-            emoji = status_emoji(status)
+            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
+            emoji = "🟢" if status.strip() == "active" else "🔴"
             keyboard.append([InlineKeyboardButton(f"{emoji} 重启 {svc}", callback_data=f"svc_restart_{svc}")])
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "🔄 <b>服务重启管理</b>\n\n选择要重启的系统服务:",
-            parse_mode='HTML',
+            "🔄 *服务重启管理*\n\n选择要重启的系统服务:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -1445,15 +1409,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         services_for_start = MONITORED_SERVICES
         keyboard = []
         for svc in services_for_start:
-            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo 未知")
+            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
             if status.strip() != "active":
                 keyboard.append([InlineKeyboardButton(f"▶️ 启动 {svc}", callback_data=f"svc_start_{svc}")])
         if not keyboard:
             keyboard.append([InlineKeyboardButton("✅ 所有服务已运行", callback_data="noop")])
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "▶️ <b>服务启动管理</b>\n\n选择要启动的系统服务:",
-            parse_mode='HTML',
+            "▶️ *服务启动管理*\n\n选择要启动的系统服务:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -1468,56 +1432,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("✅ 无可停止服务", callback_data="noop")])
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "⏹️ <b>服务停止管理</b>\n\n⚠️ 谨慎操作！选择要停止的系统服务:",
-            parse_mode='HTML',
+            "⏹️ *服务停止管理*\n\n⚠️ 谨慎操作！选择要停止的系统服务:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "service_status_menu":
-        # 并行获取服务详情
-        svc_names = ["ssh", "docker", "fail2ban", "tailscaled", "cron", "rsyslog"]
-        active_cmds = [(f"systemctl is-active {s} 2>/dev/null || echo 未知", 5) for s in svc_names]
-        enabled_cmds = [(f"systemctl is-enabled {s} 2>/dev/null || echo 未知", 5) for s in svc_names]
-        uptime_cmds = [(f"systemctl show -p ActiveEnterTimestamp --value {s} 2>/dev/null || echo N/A", 5) for s in svc_names]
-
-        actives, enableds, uptimes = await asyncio.gather(
-            arun_commands(*active_cmds),
-            arun_commands(*enabled_cmds),
-            arun_commands(*uptime_cmds),
-        )
-
-        lines = ["📊 <b>服务状态详情</b>\n"]
-        lines.append("📦 <b>系统服务详情</b>")
-        for name, active, enabled, uptime in zip(svc_names, actives, enableds, uptimes):
-            e = status_emoji(active)
-            lines.append(f"{e} <b>{name}</b>: {active.strip()}  <i>自启:{enabled.strip()} 启动:{uptime.strip()}</i>")
-
-        lines.append("\n💡 使用 /services 查看快速概览")
+        status_detail = run_command("""
+            echo "=== 系统服务详情 ==="
+            for svc in ssh docker fail2ban tailscaled cron rsyslog; do
+                active=$(systemctl is-active $svc 2>/dev/null || echo '未知')
+                enabled=$(systemctl is-enabled $svc 2>/dev/null || echo '未知')
+                uptime=$(systemctl show -p ActiveEnterTimestamp --value $svc 2>/dev/null || echo 'N/A')
+                echo "$svc: $active (开机自启: $enabled, 启动时间: $uptime)"
+            done
+        """)
         await query.edit_message_text(
-            '\n'.join(lines),
-            parse_mode='HTML',
+            f"📊 *服务状态详情*\n\n```\n{status_detail}\n```\n\n使用 /services 查看快速概览",
+            parse_mode='Markdown',
             reply_markup=make_back_button("services_menu")
         )
 
     elif data == "service_config":
-        ssh_cfg, docker_cfg, f2b_cfg = await arun_commands(
-            ("ls -la /etc/ssh/sshd_config.d/ 2>/dev/null | head -5 || echo 无配置片段", 5),
-            ("cat /etc/docker/daemon.json 2>/dev/null || echo 不存在", 5),
-            ("ls /etc/fail2ban/jail.d/ 2>/dev/null || echo 无自定义配置", 5),
-        )
-        lines = [
-            "🔧 <b>服务配置概览</b>\n",
-            "🔐 <b>SSH 配置</b>",
-            f"  主配置: /etc/ssh/sshd_config",
-            f"  配置片段:\n{fmt_shell_table(ssh_cfg, max_lines=6)}\n",
-            "🐳 <b>Docker 配置</b>",
-            f"  daemon.json:\n{fmt_shell_table(docker_cfg, max_lines=8)}\n",
-            "🛡️ <b>Fail2ban 配置</b>",
-            f"  自定义规则:\n{fmt_shell_table(f2b_cfg, max_lines=6)}",
-        ]
+        config_info = run_command("""
+            echo "=== SSH 配置 ==="
+            echo "主配置: /etc/ssh/sshd_config"
+            ls -la /etc/ssh/sshd_config.d/ 2>/dev/null | head -5 || echo "无配置片段"
+            echo ""
+            echo "=== Docker 配置 ==="
+            echo "daemon.json: $(cat /etc/docker/daemon.json 2>/dev/null || echo '不存在')"
+            echo ""
+            echo "=== Fail2ban 配置 ==="
+            ls /etc/fail2ban/jail.d/ 2>/dev/null || echo "无自定义配置"
+        """)
         await query.edit_message_text(
-            '\n'.join(lines),
-            parse_mode='HTML',
+            f"🔧 *服务配置概览*\n\n```\n{config_info}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("services_menu")
         )
 
@@ -1534,105 +1484,72 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 返回", callback_data="start")]
         ]
         await query.edit_message_text(
-            "💾 <b>备份管理</b>\n\n选择备份管理操作:",
-            parse_mode='HTML',
+            "💾 *备份管理*\n\n选择备份管理操作:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(backup_keyboard)
         )
 
 
     elif data == "backup_list":
-        # 显示备份列表 — 结构化展示
-        backup_list = run_command("ls -lh /var/backups/ 2>/dev/null | head -20 || echo 备份目录不存在")
-        lines = ["📋 <b>备份文件列表</b>\n"]
-        for line in backup_list.strip().splitlines():
-            line = line.strip()
-            if not line or line.startswith('total'):
-                continue
-            # 解析 ls -lh 输出: perms links owner group size date name
-            parts = line.split(None, 8)
-            if len(parts) >= 9:
-                size, name = parts[4], parts[8]
-                lines.append(f"  📦 <b>{name}</b>  <i>{size}</i>")
-            else:
-                lines.append(f"  {line}")
-        if len(lines) <= 1:
-            lines.append("  ⚠️ 备份目录为空或不存在")
+        # 显示备份列表
+        backup_list = run_command("ls -la /var/backups/ 2>/dev/null | head -20 || echo '备份目录不存在'")
         await query.edit_message_text(
-            '\n'.join(lines),
-            parse_mode='HTML',
+            f"📋 *备份文件列表*\n\n```\n{backup_list}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("backup_menu")
         )
 
     elif data == "restore_backup_menu":
-        backups = run_command("ls -lt /var/backups/daily/*.gpg 2>/dev/null | head -5 || echo 无加密备份\nls -lt /var/backups/daily/*.tar.gz 2>/dev/null | head -5 || echo 无普通备份")
+        backups = run_command("ls -lt /var/backups/daily/*.gpg 2>/dev/null | head -5 || echo '无加密备份'\nls -lt /var/backups/daily/*.tar.gz 2>/dev/null | head -5 || echo '无普通备份'")
         keyboard = []
-        backup_lines = []
         for line in backups.strip().split('\n'):
             if '.gpg' in line or '.tar.gz' in line:
-                parts = line.split()
-                fname = parts[-1] if parts else ''
+                fname = line.split()[-1] if line.split() else ''
                 bname = fname.split('/')[-1] if fname else ''
-                size = parts[4] if len(parts) > 4 else '?'
                 if bname:
-                    keyboard.append([InlineKeyboardButton(f"📦 {bname[:30]}", callback_data="noop")])
-                    backup_lines.append(f"  🔐 <b>{bname}</b>  <i>{size}</i>")
+                    keyboard.append([InlineKeyboardButton(f"📦 {bname[:30]}", callback_data=f"noop")])
         if not keyboard:
             keyboard.append([InlineKeyboardButton("📦 无可用备份", callback_data="noop")])
-            backup_lines.append("  ⚠️ 无可用备份文件")
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="backup_menu")])
         await query.edit_message_text(
-            f"↩️ <b>备份恢复</b>\n\n⚠️ 恢复操作需通过 SSH 手动执行\n\n📦 <b>可用备份</b>:\n" + '\n'.join(backup_lines)
-            + "\n\n💡 <b>解密命令</b>:\n<code>openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/monitoring/backup.key -in 备份文件 -out - | tar -xzf -</code>",
-            parse_mode='HTML',
+            f"↩️ *备份恢复*\n\n⚠️ 恢复操作需通过 SSH 手动执行\n\n可用备份:\n```\n{backups}\n```\n\n💡 解密命令:\n`openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/monitoring/backup.key -in 备份文件 -out - | tar -xzf -`",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "clean_backup":
-        daily_list, disk_usage = await arun_commands(
-            ("ls -lh /var/backups/daily/ 2>/dev/null | tail -n +2 || echo 目录为空", 5),
-            ("du -sh /var/backups/ 2>/dev/null || echo 无法计算", 5),
-        )
+        backup_info = run_command("""
+            echo "=== 每日备份 ==="
+            ls -lh /var/backups/daily/ 2>/dev/null | tail -n +2 || echo "目录为空"
+            echo ""
+            echo "=== 磁盘使用 ==="
+            du -sh /var/backups/ 2>/dev/null || echo "无法计算"
+        """)
         keyboard = [
             [InlineKeyboardButton("🗑️ 清理7天前备份", callback_data="clean_backup_7"),
              InlineKeyboardButton("🗑️ 清理30天前备份", callback_data="clean_backup_30")],
             [InlineKeyboardButton("🔙 返回", callback_data="backup_menu")]
         ]
-        # 解析每日备份
-        daily_lines = []
-        for line in daily_list.strip().splitlines():
-            parts = line.split(None, 8)
-            if len(parts) >= 9:
-                daily_lines.append(f"  📦 <b>{parts[8]}</b>  <i>{parts[4]}</i>")
-            elif line.strip():
-                daily_lines.append(f"  {line.strip()}")
-        if not daily_lines:
-            daily_lines.append("  ⚠️ 目录为空")
-        
-        msg = (
-            f"🗑️ <b>备份清理</b>\n\n"
-            f"📊 <b>每日备份</b>:\n" + '\n'.join(daily_lines)
-            + f"\n\n💿 <b>磁盘使用</b>: {disk_usage.strip()}"
-            + "\n\n⚠️ 清理操作不可恢复！"
-        )
         await query.edit_message_text(
-            msg,
-            parse_mode='HTML',
+            f"🗑️ *备份清理*\n\n当前备份状况:\n```\n{backup_info}\n```\n\n⚠️ 清理操作不可恢复！",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "backup_status":
-        backup_status = run_command(find_script("backup.sh") + " -s 2>&1 || echo 无法获取备份状态")
+        # 显示备份状态
+        backup_status = run_command(find_script("backup.sh") + " -s 2>&1 || echo '无法获取备份状态'")
         await query.edit_message_text(
-            f"📊 <b>备份状态</b>\n\n{fmt_shell_table(backup_status, max_lines=20)}",
-            parse_mode='HTML',
+            f"📊 *备份状态*\n\n```\n{backup_status}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("backup_menu")
         )
 
     elif data == "backup_config":
-        backup_config = run_command("cat /etc/monitoring/backup.conf 2>/dev/null || echo 备份配置文件不存在")
+        backup_config = run_command("cat /etc/monitoring/backup.conf 2>/dev/null || echo '备份配置文件不存在'")
         await query.edit_message_text(
-            f"🔧 <b>备份配置</b>\n\n{fmt_shell_table(backup_config, max_lines=20)}",
-            parse_mode='HTML',
+            f"🔧 *备份配置*\n\n```\n{backup_config}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("backup_menu")
         )
 
@@ -1794,35 +1711,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "logs_health":
         logs_content = run_command("tail -50 /var/log/monitoring/health-check.log 2>/dev/null")
-        await query.edit_message_text(f"📋 <b>健康检查日志</b>\n\n{fmt_shell_table(logs_content)}", parse_mode='HTML', reply_markup=make_back_button("logs"))
+        await query.edit_message_text(f"📋 *健康检查日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_ssh":
         logs_content = run_command("journalctl -u ssh -n 20 --no-pager 2>/dev/null")
-        await query.edit_message_text(f"📋 <b>SSH日志</b>\n\n{fmt_shell_table(logs_content)}", parse_mode='HTML', reply_markup=make_back_button("logs"))
+        await query.edit_message_text(f"📋 *SSH日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_fail2ban":
         logs_content = run_command("tail -30 /var/log/fail2ban.log 2>/dev/null")
-        await query.edit_message_text(f"📋 <b>Fail2ban日志</b>\n\n{fmt_shell_table(logs_content)}", parse_mode='HTML', reply_markup=make_back_button("logs"))
+        await query.edit_message_text(f"📋 *Fail2ban日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_docker":
-        docker_raw = run_command("docker ps -a --format '{{.Names}}|||{{.Status}}' 2>/dev/null")
-        lines = ["📋 <b>Docker状态</b>\n"]
-        for line in docker_raw.strip().splitlines():
-            if '|||' in line:
-                cname, cstatus = line.split('|||', 1)
-                lines.append(fmt_container_line(cname.strip(), cstatus.strip()))
-            elif line.strip():
-                lines.append(f"🟡 {line.strip()}")
-        if len(lines) <= 1:
-            lines.append("  ⚠️ Docker未运行")
-        await query.edit_message_text('\n'.join(lines), parse_mode='HTML', reply_markup=make_back_button("logs"))
+        logs_content = run_command("docker ps -a --format 'table {{.Names}}\\t{{.Status}}' 2>/dev/null")
+        await query.edit_message_text(f"📋 *Docker状态*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
 
     # ==================== 服务控制回调 ====================
     elif data.startswith("svc_restart_"):
         svc = data.replace("svc_restart_", "")
         if not validate_service_name(svc):
-            await query.edit_message_text("⛔ 无效的服务名", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
             return
         # Show confirmation dialog
         keyboard = [
@@ -1831,93 +1739,93 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         current_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
         await query.edit_message_text(
-            f"⚠️ <b>确认重启服务</b>\n\n服务: <b>{svc}</b>\n当前状态: {status_emoji(current_status)} {current_status}\n\n确定要重启吗？",
-            parse_mode='HTML',
+            f"⚠️ *确认重启服务*\n\n服务: {svc}\n当前状态: {current_status}\n\n确定要重启吗？",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data.startswith("confirm_svc_restart_"):
         svc = data.replace("confirm_svc_restart_", "")
         if not validate_service_name(svc):
-            await query.edit_message_text("⛔ 无效的服务名", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
             return
         result = run_command(f"systemctl restart {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
-        emoji = status_emoji(new_status)
+        emoji = "✅" if new_status.strip() == "active" else "❌"
         await query.edit_message_text(
-            f"🔄 <b>服务重启结果</b>\n\n{emoji} <b>{svc}</b>: {new_status}\n\n{fmt_shell_table(result, max_lines=10)}",
-            parse_mode='HTML',
+            f"🔄 *服务重启结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("services_menu")
         )
 
     elif data.startswith("svc_start_"):
         svc = data.replace("svc_start_", "")
         if not validate_service_name(svc):
-            await query.edit_message_text("⛔ 无效的服务名", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
             return
         result = run_command(f"systemctl start {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
-        emoji = status_emoji(new_status)
+        emoji = "✅" if new_status.strip() == "active" else "❌"
         await query.edit_message_text(
-            f"▶️ <b>服务启动结果</b>\n\n{emoji} <b>{svc}</b>: {new_status}\n\n{fmt_shell_table(result, max_lines=10)}",
-            parse_mode='HTML',
+            f"▶️ *服务启动结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("services_menu")
         )
 
     elif data.startswith("svc_stop_"):
         svc = data.replace("svc_stop_", "")
         if not validate_service_name(svc):
-            await query.edit_message_text("⛔ 无效的服务名", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
             return
         keyboard = [
             [InlineKeyboardButton("✅ 确认停止", callback_data=f"confirm_svc_stop_{svc}"),
              InlineKeyboardButton("❌ 取消", callback_data="services_menu")]
         ]
         await query.edit_message_text(
-            f"⚠️ <b>确认停止服务</b>\n\n服务: <b>{svc}</b>\n\n⚠️ 停止服务可能影响系统运行！确定要停止吗？",
-            parse_mode='HTML',
+            f"⚠️ *确认停止服务*\n\n服务: {svc}\n\n⚠️ 停止服务可能影响系统运行！确定要停止吗？",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data.startswith("confirm_svc_stop_"):
         svc = data.replace("confirm_svc_stop_", "")
         if not validate_service_name(svc):
-            await query.edit_message_text("⛔ 无效的服务名", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的服务名", parse_mode='Markdown')
             return
         result = run_command(f"systemctl stop {svc} 2>&1")
         new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
-        emoji = status_emoji(new_status)
+        emoji = "🛑" if new_status.strip() != "active" else "❌"
         await query.edit_message_text(
-            f"⏹️ <b>服务停止结果</b>\n\n{emoji} <b>{svc}</b>: {new_status}\n\n{fmt_shell_table(result, max_lines=10)}",
-            parse_mode='HTML',
+            f"⏹️ *服务停止结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("services_menu")
         )
 
     elif data.startswith("clean_backup_"):
         days = data.replace("clean_backup_", "")
         if not days.isdigit() or int(days) < 1:
-            await query.edit_message_text("⛔ 无效的天数", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的天数", parse_mode='Markdown')
             return
         keyboard = [
             [InlineKeyboardButton("✅ 确认清理", callback_data=f"confirm_clean_{days}"),
              InlineKeyboardButton("❌ 取消", callback_data="backup_menu")]
         ]
         await query.edit_message_text(
-            f"⚠️ <b>确认清理备份</b>\n\n将删除 <b>{days}</b> 天前的所有备份\n\n⚠️ 此操作不可恢复！确定要继续吗？",
-            parse_mode='HTML',
+            f"⚠️ *确认清理备份*\n\n将删除 {days} 天前的所有备份\n\n⚠️ 此操作不可恢复！确定要继续吗？",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data.startswith("confirm_clean_"):
         days = data.replace("confirm_clean_", "")
         if not days.isdigit() or int(days) < 1:
-            await query.edit_message_text("⛔ 无效的天数", parse_mode='HTML')
+            await query.edit_message_text("⛔ 无效的天数", parse_mode='Markdown')
             return
         result = run_command(f"find /var/backups/daily/ -name '*.gpg' -mtime +{days} -delete 2>&1\nfind /var/backups/daily/ -name '*.tar.gz' -mtime +{days} -delete 2>&1")
         remaining = run_command("ls /var/backups/daily/ 2>/dev/null | wc -l")
         await query.edit_message_text(
-            f"🗑️ <b>备份清理完成</b>\n\n清理了 <b>{days}</b> 天前的备份\n剩余备份数: <b>{remaining}</b>\n\n{fmt_shell_table(result, max_lines=10)}",
-            parse_mode='HTML',
+            f"🗑️ *备份清理完成*\n\n清理了 {days} 天前的备份\n剩余备份数: {remaining}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
             reply_markup=make_back_button("backup_menu")
         )
 
@@ -2055,8 +1963,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.3 starting with AI and SSH performance support...")
-    print("Server-Admin Bot v3.3 已启动 (AI增强版 + SSH性能监控)")
+    logger.info("Bot v3.2 starting with AI and SSH performance support...")
+    print("Server-Admin Bot v3.2 已启动 (AI增强版 + SSH性能监控)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
