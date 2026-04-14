@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.4
-交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断
+Server-Admin Telegram Bot v3.5
+交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警
 
 命令菜单:
 - /start  - 欢迎信息和主菜单
@@ -124,6 +124,120 @@ async def send_thinking(update: Update, text: str = "🤔 处理中..."):
 def make_back_button(callback_data: str = "start") -> InlineKeyboardMarkup:
     """创建带返回按钮的键盘"""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=callback_data)]])
+
+# ==================== 状态指示器工具 ====================
+
+def status_emoji(status: str) -> str:
+    """服务状态 → emoji 指示灯"""
+    s = status.strip().lower()
+    if s in ('active', 'running', 'yes', 'enabled', 'up'):
+        return '🟢'
+    elif s in ('inactive', 'stopped', 'no', 'disabled', 'down'):
+        return '🔴'
+    elif s in ('failed', 'error', 'unknown', '未知'):
+        return '🟠'
+    else:
+        return '🟡'
+
+# ==================== Phase 2: 主动告警系统 ====================
+
+import threading
+import time as time_module
+
+# 告警阈值配置
+ALERT_THRESHOLDS = {
+    'disk_percent': 80,
+    'mem_percent': 90,
+    'load_factor': 1.5,  # 负载/CPU核心数
+}
+
+# 告警状态缓存（避免重复告警）
+alert_state = {
+    'disk_warned': False,
+    'mem_warned': False,
+    'load_warned': False,
+    'last_check': 0,
+}
+
+# 静默时段（夜间不打扰）
+SILENCE_START = 23  # 23:00
+SILENCE_END = 7     # 07:00
+
+def is_silence_hours() -> bool:
+    """检查当前是否在静默时段"""
+    hour = datetime.now().hour
+    return SILENCE_START <= hour or hour < SILENCE_END
+
+async def check_and_alert(bot_app):
+    """后台监控检查"""
+    while True:
+        try:
+            # 每 5 分钟检查一次
+            await asyncio.sleep(300)
+            
+            # 静默时段跳过
+            if is_silence_hours():
+                continue
+            
+            # 收集指标
+            _disk = run_command("df -h / | awk 'NR==2{print $5}' | tr -d '%'")
+            _mem = run_command("free | awk '/Mem/{printf \"%.0f\", $3/$2*100}'")
+            _load = run_command("cat /proc/loadavg | awk '{print $1}'")
+            _nproc = run_command("nproc")
+            
+            alerts = []
+            
+            # 磁盘检查
+            disk_pct = int(_disk) if _disk.isdigit() else 0
+            if disk_pct > ALERT_THRESHOLDS['disk_percent']:
+                if not alert_state['disk_warned']:
+                    alerts.append(f"💿 <b>磁盘告警</b>: {disk_pct}% > {ALERT_THRESHOLDS['disk_percent']}%\n建议清理或扩容")
+                    alert_state['disk_warned'] = True
+            else:
+                alert_state['disk_warned'] = False
+            
+            # 内存检查
+            mem_pct = float(_mem) if _mem else 0
+            if mem_pct > ALERT_THRESHOLDS['mem_percent']:
+                if not alert_state['mem_warned']:
+                    alerts.append(f"💾 <b>内存告警</b>: {mem_pct:.1f}% > {ALERT_THRESHOLDS['mem_percent']}%\n建议检查内存泄漏")
+                    alert_state['mem_warned'] = True
+            else:
+                alert_state['mem_warned'] = False
+            
+            # 负载检查
+            load1 = float(_load) if _load else 0
+            nproc = int(_nproc) if _nproc.isdigit() else 1
+            if load1 > nproc * ALERT_THRESHOLDS['load_factor']:
+                if not alert_state['load_warned']:
+                    alerts.append(f"📈 <b>负载告警</b>: {load1:.2f} > {nproc * ALERT_THRESHOLDS['load_factor']:.1f}\n建议检查进程")
+                    alert_state['load_warned'] = True
+            else:
+                alert_state['load_warned'] = False
+            
+            # 发送告警
+            if alerts:
+                from telegram import Bot
+                bot = bot_app.bot
+                chat_id = load_config().get('TELEGRAM_CHAT_ID')
+                if chat_id:
+                    msg = f"⚠️ <b>系统告警</b>\n\n" + "\n\n".join(alerts)
+                    msg += f"\n\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                    logger.warning(f"Sent {len(alerts)} alerts")
+            
+        except Exception as e:
+            logger.error(f"Alert check error: {e}")
+
+def start_alert_monitor(app):
+    """启动后台监控线程"""
+    async def monitor():
+        await check_and_alert(app)
+    
+    # 创建后台任务
+    task = asyncio.create_task(monitor())
+    logger.info("Alert monitor started")
+    return task
 
 # ==================== 安全工具 ====================
 
@@ -1287,7 +1401,7 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.4</b>
+    return """🤖 <b>Server-Admin Bot v3.5</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -1933,8 +2047,13 @@ def main():
         print("错误: 未找到 TELEGRAM_BOT_TOKEN")
         return
 
-    # 创建应用
-    application = Application.builder().token(TOKEN).build()
+    # 创建应用（带 post_init 启动监控）
+    async def post_init(app):
+        """应用初始化后启动后台任务"""
+        logger.info("Starting alert monitor...")
+        start_alert_monitor(app)
+    
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
 
     # 注册命令处理器
     application.add_handler(CommandHandler("start", start))
@@ -1963,8 +2082,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.2 starting with AI and SSH performance support...")
-    print("Server-Admin Bot v3.2 已启动 (AI增强版 + SSH性能监控)")
+    logger.info("Bot v3.5 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v3.5 已启动 (AI增强 + SSH性能 + 主动告警)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
