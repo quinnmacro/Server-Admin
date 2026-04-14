@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.9
+Server-Admin Telegram Bot v4.0
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控 + 快速诊断 + 主动告警 + 智能日志
 
 命令菜单:
@@ -216,6 +216,53 @@ def get_operation_count(operation_type: str = None) -> int:
 # 初始化数据库
 init_history_db()
 
+# 性能基线数据库
+PERFORMANCE_DB = Path.home() / ".hermes" / "bot_performance.db"
+
+def init_performance_db():
+    """初始化性能基线数据库"""
+    PERFORMANCE_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(PERFORMANCE_DB)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS metrics
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  metric_type TEXT NOT NULL,
+                  value REAL NOT NULL,
+                  unit TEXT,
+                  details TEXT)""")
+    conn.commit()
+    conn.close()
+
+def record_metric(metric_type: str, value: float, unit: str = "", details: str = ""):
+    """记录性能指标"""
+    try:
+        conn = sqlite3.connect(PERFORMANCE_DB)
+        c = conn.cursor()
+        c.execute("INSERT INTO metrics (metric_type, value, unit, details) VALUES (?, ?, ?, ?)",
+                  (metric_type, value, unit, details))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to record metric: {e}")
+
+def get_metric_history(metric_type: str, hours: int = 24) -> list:
+    """获取指标历史数据"""
+    try:
+        conn = sqlite3.connect(PERFORMANCE_DB)
+        c = conn.cursor()
+        c.execute("""SELECT timestamp, value FROM metrics 
+                     WHERE metric_type = ? AND timestamp >= datetime('now', ?)
+                     ORDER BY timestamp ASC""", (metric_type, f'-{hours} hours'))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Failed to get metric history: {e}")
+        return []
+
+init_performance_db()
+
 # 告警阈值配置
 ALERT_THRESHOLDS = {
     'disk_percent': 80,
@@ -257,10 +304,18 @@ async def check_and_alert(bot_app):
             _load = run_command("cat /proc/loadavg | awk '{print $1}'")
             _nproc = run_command("nproc")
             
+            # 记录性能基线
+            disk_pct = int(_disk) if _disk.isdigit() else 0
+            mem_pct = float(_mem) if _mem else 0
+            load1 = float(_load) if _load else 0
+            
+            record_metric("disk_percent", disk_pct, "%")
+            record_metric("mem_percent", mem_pct, "%")
+            record_metric("load_1m", load1, "")
+            
             alerts = []
             
             # 磁盘检查
-            disk_pct = int(_disk) if _disk.isdigit() else 0
             if disk_pct > ALERT_THRESHOLDS['disk_percent']:
                 if not alert_state['disk_warned']:
                     alerts.append(f"💿 <b>磁盘告警</b>: {disk_pct}% > {ALERT_THRESHOLDS['disk_percent']}%\n建议清理或扩容")
@@ -269,7 +324,6 @@ async def check_and_alert(bot_app):
                 alert_state['disk_warned'] = False
             
             # 内存检查
-            mem_pct = float(_mem) if _mem else 0
             if mem_pct > ALERT_THRESHOLDS['mem_percent']:
                 if not alert_state['mem_warned']:
                     alerts.append(f"💾 <b>内存告警</b>: {mem_pct:.1f}% > {ALERT_THRESHOLDS['mem_percent']}%\n建议检查内存泄漏")
@@ -278,7 +332,6 @@ async def check_and_alert(bot_app):
                 alert_state['mem_warned'] = False
             
             # 负载检查
-            load1 = float(_load) if _load else 0
             nproc = int(_nproc) if _nproc.isdigit() else 1
             if load1 > nproc * ALERT_THRESHOLDS['load_factor']:
                 if not alert_state['load_warned']:
@@ -1745,7 +1798,7 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 def build_welcome_message() -> str:
     """构建欢迎消息"""
-    return """🤖 <b>Server-Admin Bot v3.9</b>
+    return """🤖 <b>Server-Admin Bot v4.0</b>
 
 欢迎使用服务器智能管理机器人！
 
@@ -2494,8 +2547,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.9 starting with AI, SSH performance, and alert monitoring...")
-    print("Server-Admin Bot v3.9 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
+    logger.info("Bot v4.0 starting with AI, SSH performance, and alert monitoring...")
+    print("Server-Admin Bot v4.0 已启动 (AI增强 + SSH性能 + 主动告警 + 智能日志)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
