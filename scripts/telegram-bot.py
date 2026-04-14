@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Server-Admin Telegram Bot v3.0
+Server-Admin Telegram Bot v3.1
 交互式服务器管理机器人 + AI 智能助手 + SSH性能监控
 
 命令菜单:
@@ -323,7 +323,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    welcome = """🤖 *Server-Admin Bot v3.0*
+    welcome = """🤖 *Server-Admin Bot v3.1*
 
 欢迎使用服务器智能管理机器人！
 
@@ -1144,7 +1144,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")],
         [InlineKeyboardButton("❓ 帮助", callback_data="help")]
         ]
-        welcome = """🤖 *Server-Admin Bot v3.0*
+        welcome = """🤖 *Server-Admin Bot v3.1*
 
 欢迎使用服务器智能管理机器人！
 
@@ -1772,8 +1772,8 @@ def main():
     # 注册消息处理器（AI 对话）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot v3.0 starting with AI and SSH performance support...")
-    print("Server-Admin Bot v3.0 已启动 (AI增强版 + SSH性能监控)")
+    logger.info("Bot v3.1 starting with AI and SSH performance support...")
+    print("Server-Admin Bot v3.1 已启动 (AI增强版 + SSH性能监控)")
 
     # 启动机器人 (使用 polling)，忽略挂起的更新以避免冲突
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
