@@ -388,123 +388,6 @@ check_system_errors() {
     fi
 }
 
-# ==================== SSH性能检查 ====================
-
-# 检查SSH响应时间
-check_ssh_response_time() {
-    local iterations=3
-    local total_ms=0
-    local success=0
-
-    log "检查SSH响应时间..."
-
-    for i in $(seq 1 $iterations); do
-        local start_ms=$(get_timestamp_ms)
-
-        if ssh -o ConnectTimeout=5 -o BatchMode=yes localhost "echo -n" 2>/dev/null; then
-            local end_ms=$(get_timestamp_ms)
-            local duration=$((end_ms - start_ms))
-            total_ms=$((total_ms + duration))
-            success=$((success + 1))
-            [ "$QUIET" = false ] && log "  测试 $i: ${duration}ms"
-        else
-            [ "$QUIET" = false ] && log "  测试 $i: 失败"
-        fi
-
-        sleep 0.1
-    done
-
-    if [ $success -gt 0 ]; then
-        local avg_ms=$((total_ms / success))
-
-        if [ "$avg_ms" -gt 1000 ]; then
-            alert "SSH响应时间过高: ${avg_ms}ms"
-        elif [ "$avg_ms" -gt 500 ]; then
-            log "WARNING: SSH响应时间较高: ${avg_ms}ms"
-        else
-            log "SSH响应时间 ${avg_ms}ms - 正常"
-        fi
-    else
-        alert "SSH响应时间测试失败: 无法连接到SSH服务"
-    fi
-}
-
-# 获取时间戳（毫秒）
-get_timestamp_ms() {
-    if command -v python3 &>/dev/null; then
-        python3 -c 'import time; print(int(time.time() * 1000))'
-    elif command -v python &>/dev/null; then
-        python -c 'import time; print(int(time.time() * 1000))'
-    else
-        date +%s%3N 2>/dev/null || date +%s000
-    fi
-}
-
-# 检查SSH连接数
-check_ssh_connections() {
-    log "检查SSH连接数..."
-
-    # 获取当前SSH连接数
-    local ssh_connections=$(ss -tan 2>/dev/null | grep ':22' | grep ESTAB | wc -l)
-    ssh_connections=${ssh_connections:-0}
-
-    # 获取SSH进程数
-    local ssh_processes=$(ps aux | grep -E '[s]shd:' | wc -l)
-    ssh_processes=${ssh_processes:-0}
-
-    if [ "$ssh_connections" -gt 50 ]; then
-        alert "SSH连接数过多: ${ssh_connections} 个活动连接"
-    elif [ "$ssh_connections" -gt 20 ]; then
-        log "WARNING: SSH连接数较多: ${ssh_connections} 个活动连接"
-    else
-        log "SSH连接数 ${ssh_connections} - 正常 (${ssh_processes}个SSH进程)"
-    fi
-}
-
-# 检查SSH服务状态
-check_ssh_uptime() {
-    log "检查SSH服务状态..."
-
-    if systemctl is-active --quiet ssh; then
-        local uptime=$(systemctl show -p ActiveEnterTimestamp --value ssh 2>/dev/null)
-        local status=$(systemctl show -p SubState --value ssh 2>/dev/null)
-
-        log "SSH服务运行中 (状态: ${status}, 启动时间: ${uptime})"
-    else
-        alert "SSH服务未运行"
-    fi
-}
-
-# 检查SSH配置优化状态
-check_ssh_config() {
-    log "检查SSH配置优化状态..."
-
-    # 检查性能配置文件是否存在
-    if [ -f "/etc/ssh/sshd_config.d/performance.conf" ]; then
-        local config_age=$(($(date +%s) - $(stat -c %Y /etc/ssh/sshd_config.d/performance.conf 2>/dev/null || echo 0)))
-
-        if [ "$config_age" -lt 86400 ]; then  # 24小时内
-            log "SSH性能配置已部署 ($(($config_age / 3600))小时前)"
-
-            # 检查关键配置项
-            local max_sessions=$(sshd -T 2>/dev/null | grep maxsessions | awk '{print $2}')
-            local use_dns=$(sshd -T 2>/dev/null | grep usedns | awk '{print $2}')
-
-            if [ -n "$max_sessions" ] && [ "$max_sessions" -ge 20 ]; then
-                log "  MaxSessions: ${max_sessions} (已优化)"
-            fi
-
-            if [ -n "$use_dns" ] && [ "$use_dns" = "no" ]; then
-                log "  UseDNS: no (已优化)"
-            fi
-        else
-            log "SSH性能配置已部署 ($(($config_age / 86400))天前)"
-        fi
-    else
-        log "SSH性能配置未部署"
-    fi
-}
-
 # ==================== 主流程 ====================
 
 main() {
@@ -532,13 +415,6 @@ main() {
     check_fail2ban_status
     check_suspicious_ports
     check_zombie_processes
-
-    # === SSH性能检查 ===
-    log "--- SSH性能 ---"
-    check_ssh_response_time
-    check_ssh_connections
-    check_ssh_uptime
-    check_ssh_config
 
     # === OOM 检查 ===
     log "--- 内存溢出 ---"

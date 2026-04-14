@@ -39,8 +39,91 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+# ==================== 智能路径检测 ====================
+
+SCRIPT_SEARCH_PATHS = [
+    "/usr/local/sbin/monitoring",
+    "/root/repos/Server-Admin/scripts",
+    os.path.dirname(os.path.abspath(__file__)),
+    "/Users/liulu/Server-Admin/scripts",
+]
+
+LOG_SEARCH_PATHS = [
+    "/var/log/monitoring",
+    "/root/repos/Server-Admin/logs/monitoring",
+    "/Users/liulu/Server-Admin/logs/monitoring",
+]
+
+def find_script(name: str) -> str:
+    """智能查找脚本路径"""
+    for path in SCRIPT_SEARCH_PATHS:
+        full = os.path.join(path, name)
+        if os.path.isfile(full):
+            return full
+    try:
+        result = subprocess.run(f"which {name}", shell=True, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    return name
+
+def find_log_dir() -> str:
+    """智能查找日志目录"""
+    for path in LOG_SEARCH_PATHS:
+        if os.path.isdir(path):
+            return path
+    return "/var/log/monitoring"
+
+def find_config_file() -> str:
+    """智能查找配置文件"""
+    config_files = [
+        "/etc/monitoring/config.conf",
+        "/root/.monitoring/config.conf",
+        "/Users/liulu/.monitoring/config.conf",
+    ]
+    for f in config_files:
+        if os.path.exists(f):
+            return f
+    return config_files[0]
+
+async def reply_or_edit(update: Update, text: str, reply_markup=None, parse_mode='Markdown'):
+    """统一回复：兼容消息命令和按钮回调"""
+    try:
+        if update.message:
+            if reply_markup:
+                await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(text, parse_mode=parse_mode)
+        elif update.callback_query:
+            if reply_markup:
+                await update.callback_query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            else:
+                await update.callback_query.edit_message_text(text, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"reply_or_edit error: {e}")
+        try:
+            if update.callback_query and update.callback_query.message:
+                await update.callback_query.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except Exception as e2:
+            logger.error(f"reply_or_edit fallback error: {e2}")
+
+async def send_thinking(update: Update, text: str = "🤔 处理中..."):
+    """发送思考中提示（兼容命令和回调）"""
+    if update.message:
+        return await update.message.reply_text(text)
+    elif update.callback_query and update.callback_query.message:
+        return await update.callback_query.message.reply_text(text)
+    return None
+
+def make_back_button(callback_data: str = "start") -> InlineKeyboardMarkup:
+    """创建带返回按钮的键盘"""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=callback_data)]])
+
+
+
 # 配置
-CONFIG_FILE = "/Users/liulu/.monitoring/config.conf"
+CONFIG_FILE = find_config_file()
 # LOG_FILE 将在 load_config() 后根据环境确定
 
 # AI 配置
@@ -202,17 +285,21 @@ def call_ai(prompt: str, system_prompt: str = None) -> str:
 
 def get_server_context() -> str:
     """获取服务器上下文信息用于 AI 分析"""
-    context = f"""
-服务器信息:
-- 主机: Vultr 东京
-- 配置: 1 vCPU, 2GB RAM, 52GB SSD
-- 系统: Ubuntu 24.04 LTS
-- 运行时间: {run_command("uptime -p | sed 's/up //'")}
-- 内存: {run_command("free -m | awk 'NR==2{printf \"%s/%s MB (%.1f%%)\", $3, $2, $3*100/$2}'")}
-- 磁盘: {run_command("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")}
-- 负载: {run_command("cat /proc/loadavg | awk '{print $1\",\"$2\",\"$3}'")}
-- 容器: {run_command("docker ps --format '{{.Names}}: {{.Status}}' | tr '\\n' ', '")}
-"""
+    _uptime = run_command("uptime -p | sed 's/up //'")
+    _mem = run_command("free -m | awk 'NR==2{printf \"%s/%s MB (%.1f%%)\", $3, $2, $3*100/$2}'")
+    _disk = run_command("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
+    _load = run_command("cat /proc/loadavg | awk '{print $1,\"\",$2,\"\",$3}'")
+    _containers = run_command("docker ps --format '{{.Names}}: {{.Status}}'")
+    context = (
+        f"服务器信息:\n"
+        f"- 主机: Vultr 东京\n"
+        f"- 配置: 1 vCPU, 2GB RAM, 52GB SSD\n"
+        f"- 运行时间: {_uptime}\n"
+        f"- 内存: {_mem}\n"
+        f"- 磁盘: {_disk}\n"
+        f"- 负载: {_load}\n"
+        f"- 容器: {_containers}\n"
+    )
     return context
 
 # ==================== 命令处理 ====================
@@ -311,15 +398,8 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 判断是来自消息还是回调查询
-    if update.callback_query:
-        message = update.callback_query.message
-        thinking_msg = await message.reply_text("🔍 正在收集服务器信息并分析...")
-    elif update.message:
-        message = update.message
-        thinking_msg = await message.reply_text("🔍 正在收集服务器信息并分析...")
-    else:
-        # 无法回复
-        logger.error("无法获取消息对象")
+    thinking_msg = await send_thinking(update, "🔍 正在收集服务器信息并分析...")
+    if not thinking_msg:
         return
 
     # 获取服务器上下文
@@ -340,7 +420,10 @@ async def ai_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 转义Markdown避免解析错误
     escaped_response = escape_markdown(response)
-    await thinking_msg.edit_text(f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
+    if thinking_msg:
+        await thinking_msg.edit_text(f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
+    else:
+        await reply_or_edit(update, f"🔍 *AI 服务器分析*\n\n{escaped_response}", parse_mode='Markdown')
     logger.info("AI analysis executed")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -385,29 +468,22 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    # 获取系统信息
     mem = run_command("free -m | awk 'NR==2{printf \"%s/%s MB (%.1f%%)\", $3, $2, $3*100/$2}'")
     disk = run_command("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
-    load = run_command("cat /proc/loadavg | awk '{print $1\" \"$2\" \"$3}'")
+    load = run_command("cat /proc/loadavg | awk '{print $1, $2, $3}'")
     uptime = run_command("uptime -p | sed 's/up //'")
     containers = run_command("docker ps --format '{{.Names}}: {{.Status}}' 2>/dev/null || echo 'Docker未运行'")
 
-    status_msg = f"""📊 *服务器状态*
+    status_msg = (
+        f"📊 *服务器状态*\n\n"
+        f"⏱ *运行时间*: {uptime}\n"
+        f"💾 *内存*: {mem}\n"
+        f"💿 *磁盘*: {disk}\n"
+        f"📈 *负载*: {load}\n\n"
+        f"🐳 *容器状态*:\n```\n{containers}\n```"
+    )
 
-⏱ *运行时间*: {uptime}
-💾 *内存*: {mem}
-💿 *磁盘*: {disk}
-📈 *负载*: {load}
-
-🐳 *容器状态*:
-```
-{containers}
-```"""
-
-    if update.message:
-        await update.message.reply_text(status_msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(status_msg, parse_mode='Markdown')
+    await reply_or_edit(update, status_msg, parse_mode='Markdown')
     logger.info("Status command executed")
 
 async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -432,10 +508,7 @@ async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {services_list}
 ```"""
 
-    if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(msg, parse_mode='Markdown')
+    await reply_or_edit(update, msg, parse_mode='Markdown')
 
 async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看日志"""
@@ -459,10 +532,7 @@ async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 返回", callback_data="start")]
     ]
 
-    if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    await reply_or_edit(update, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """手动备份"""
@@ -471,13 +541,10 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "💾 *开始备份...*\n\n备份任务已在后台执行，完成后会发送通知。"
 
-    if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(msg, parse_mode='Markdown')
+    await reply_or_edit(update, msg, parse_mode='Markdown')
 
     # 异步执行备份
-    run_command("/Users/liulu/Server-Admin/scripts/backup.sh &")
+    run_command(find_script("backup.sh") + " &")
     logger.info("Backup command executed")
 
 async def restart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -495,10 +562,7 @@ async def restart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "🔄 *选择要重启的容器*"
 
-    if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    await reply_or_edit(update, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def restart_container(update: Update, context: ContextTypes.DEFAULT_TYPE, container: str):
     """重启容器"""
@@ -555,10 +619,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *问题反馈:*
 GitHub: github.com/quinnmacro/Server-Admin"""
 
-    if update.message:
-        await update.message.reply_text(help_msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(help_msg, parse_mode='Markdown')
+    await reply_or_edit(update, help_msg, reply_markup=make_back_button(), parse_mode='Markdown')
 
 # ==================== 彩蛋功能 ====================
 
@@ -631,38 +692,32 @@ async def ssh_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    # 获取SSH服务状态
-    ssh_service = run_command("systemctl is-active ssh")
-    ssh_uptime = run_command("systemctl show -p ActiveEnterTimestamp --value ssh")
+    _svc = run_command("systemctl is-active ssh")
+    _uptime = run_command("systemctl show -p ActiveEnterTimestamp --value ssh")
+    _conns = run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")
+    _mem = run_command("ps aux | grep sshd | grep -v grep | awk '{sum += $6} END {print sum/1024 \"MB\"}'")
+    _resp = run_command("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'")
+    _maxsess = run_command("sshd -T 2>/dev/null | grep maxsessions | awk '{print $2}'")
+    _usedns = run_command("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'")
+    _comp = run_command("sshd -T 2>/dev/null | grep compression | awk '{print $2}'")
+    _perf_conf = run_command("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes' || echo 'no'")
+    
+    opt_status = '✅ 已优化' if _perf_conf.strip() == 'yes' else '❌ 未优化'
+    status_msg = (
+        f"🔐 *SSH服务状态*\n\n"
+        f"🟢 服务状态: {_svc}\n"
+        f"⏱ 运行时间: {_uptime}\n"
+        f"👥 活动连接: {_conns} 个\n"
+        f"💾 内存使用: {_mem}\n"
+        f"⏱ 响应时间: {_resp}\n\n"
+        f"📊 性能指标:\n"
+        f"• MaxSessions: {_maxsess}\n"
+        f"• UseDNS: {_usedns}\n"
+        f"• Compression: {_comp}\n\n"
+        f"🔧 优化状态: {opt_status}"
+    )
 
-    # 获取SSH连接数
-    ssh_connections = run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")
-
-    # 获取SSH进程内存使用
-    ssh_memory = run_command("ps aux | grep sshd | grep -v grep | awk '{sum += $6} END {print sum/1024 \"MB\"}'")
-
-    # 获取SSH响应时间（简单测试）
-    response_time = run_command("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'")
-
-    status_msg = f"""🔐 *SSH服务状态*
-
-🟢 服务状态: {ssh_service}
-⏱ 运行时间: {ssh_uptime}
-👥 活动连接: {ssh_connections} 个
-💾 内存使用: {ssh_memory}
-⏱ 响应时间: {response_time}
-
-📊 性能指标:
-• MaxSessions: {run_command("sshd -T 2>/dev/null | grep maxsessions | awk '{print $2}'")}
-• UseDNS: {run_command("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'")}
-• Compression: {run_command("sshd -T 2>/dev/null | grep compression | awk '{print $2}'")}
-
-🔧 优化状态: {'✅ 已优化' if run_command("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes'") == 'yes' else '❌ 未优化'}"""
-
-    if update.message:
-        await update.message.reply_text(status_msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(status_msg, parse_mode='Markdown')
+    await reply_or_edit(update, status_msg, parse_mode='Markdown')
     logger.info("SSH status command executed")
 
 async def ssh_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -671,12 +726,12 @@ async def ssh_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 运行SSH性能测试
-    thinking_msg = await update.message.reply_text("🔍 正在运行SSH性能测试...")
+    thinking_msg = await send_thinking(update, "🔍 正在运行SSH性能测试...")
 
     # 调用现有的ssh-benchmark.sh脚本
-    benchmark_result = run_command("/Users/liulu/Server-Admin/scripts/ssh-benchmark.sh --quick")
+    benchmark_result = run_command(find_script("ssh-benchmark.sh") + " --quick")
 
-    await thinking_msg.edit_text(f"📊 *SSH性能测试报告*\n\n{benchmark_result}", parse_mode='Markdown')
+    await reply_or_edit(update, f"📊 *SSH性能测试报告*\n\n{escape_markdown(str(benchmark_result))}", parse_mode='Markdown')
     logger.info("SSH performance test executed")
 
 async def ssh_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -704,14 +759,14 @@ async def ssh_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3. 安全优化建议
 4. 具体的配置修改命令"""
 
-    thinking_msg = await update.message.reply_text("🤔 正在分析SSH配置并生成优化建议...")
+    thinking_msg = await send_thinking(update, "🤔 正在分析SSH配置并生成优化建议...")
 
     system_prompt = "你是一个专业的SSH服务器优化专家，擅长性能调优和安全配置。请用中文回答，提供具体的配置命令。"
     response = call_ai(prompt, system_prompt)
 
     # 转义Markdown避免解析错误
     escaped_response = escape_markdown(response)
-    await thinking_msg.edit_text(f"🔧 *SSH优化建议*\n\n{escaped_response}", parse_mode='Markdown')
+    await reply_or_edit(update, f"🔧 *SSH优化建议*\n\n{escaped_response}", parse_mode='Markdown')
     logger.info("SSH optimize suggestion executed")
 
 async def ssh_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -719,37 +774,51 @@ async def ssh_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    # 收集诊断信息
-    thinking_msg = await update.message.reply_text("🔍 正在诊断SSH连接问题...")
+    thinking_msg = await send_thinking(update, "🔍 正在诊断SSH连接问题...")
 
-    diagnostic_info = f"""🔧 *SSH连接诊断报告*
+    _ssh_svc = run_command("systemctl is-active ssh")
+    _port_listen = run_command("ss -tln | grep ':22' || echo '未监听'")
+    _local_conn = run_command("timeout 3 bash -c 'echo >/dev/tcp/127.0.0.1/22' 2>&1 && echo '本地连接正常' || echo '本地连接失败'")
+    _conn_time = run_command("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'")
+    _active = run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")
+    _procs = run_command("ps aux | grep sshd | grep -v grep | wc -l")
+    _f2b = run_command("fail2ban-client ping 2>&1 | grep -q 'pong' && echo '正常' || echo '异常'")
+    _disk = run_command("df -h / | awk 'NR==2{print $5}'")
+    _load = run_command("cat /proc/loadavg | awk '{print $1}'")
+    _permit_root = run_command("sshd -T 2>/dev/null | grep permitrootlogin | awk '{print $2}'")
+    _pwd_auth = run_command("sshd -T 2>/dev/null | grep passwordauthentication | awk '{print $2}'")
+    _max_auth = run_command("sshd -T 2>/dev/null | grep maxauthtries | awk '{print $2}'")
+    _perf_deployed = run_command("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes' || echo 'no'")
+    _usedns = run_command("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'")
+    _comp = run_command("sshd -T 2>/dev/null | grep compression | awk '{print $2}'")
+    
+    perf_status = '✅ 已部署' if _perf_deployed.strip() == 'yes' else '❌ 未部署'
+    
+    diagnostic_info = (
+        f"🔧 *SSH连接诊断报告*\n\n"
+        f"📊 *基本连接测试:*\n"
+        f"• SSH服务状态: {_ssh_svc}\n"
+        f"• SSH端口监听: {_port_listen}\n"
+        f"• 网络连通性: {_local_conn}\n\n"
+        f"📈 *性能指标:*\n"
+        f"• 连接建立时间: {_conn_time}\n"
+        f"• 活跃连接数: {_active}\n"
+        f"• SSH进程数: {_procs}\n\n"
+        f"⚠️ *常见问题检查:*\n"
+        f"• Fail2ban状态: {_f2b}\n"
+        f"• 磁盘空间: {_disk}\n"
+        f"• 系统负载: {_load}\n\n"
+        f"🔒 *安全配置检查:*\n"
+        f"• PermitRootLogin: {_permit_root}\n"
+        f"• PasswordAuthentication: {_pwd_auth}\n"
+        f"• MaxAuthTries: {_max_auth}\n\n"
+        f"🎯 *优化配置检查:*\n"
+        f"• 性能配置: {perf_status}\n"
+        f"• UseDNS: {_usedns}\n"
+        f"• Compression: {_comp}"
+    )
 
-📊 *基本连接测试:*
-• SSH服务状态: {run_command("systemctl is-active ssh")}
-• SSH端口监听: {run_command("ss -tln | grep ':22' || echo '未监听'")}
-• 网络连通性: {run_command("timeout 3 bash -c 'echo >/dev/tcp/127.0.0.1/22' 2>&1 && echo '本地连接正常' || echo '本地连接失败'")}
-
-📈 *性能指标:*
-• 连接建立时间: {run_command("timeout 5 bash -c 'time (ssh -o ConnectTimeout=3 localhost echo -n 2>&1 >/dev/null)' 2>&1 | grep real | awk '{print $2}'")}
-• 活跃连接数: {run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")}
-• SSH进程数: {run_command("ps aux | grep sshd | grep -v grep | wc -l")}
-
-⚠️ *常见问题检查:*
-• Fail2ban状态: {run_command("fail2ban-client ping 2>&1 | grep -q 'pong' && echo '正常' || echo '异常'")}
-• 磁盘空间: {run_command("df -h / | awk 'NR==2{print $5}'")}
-• 系统负载: {run_command("cat /proc/loadavg | awk '{print $1}'")}
-
-🔒 *安全配置检查:*
-• PermitRootLogin: {run_command("sshd -T 2>/dev/null | grep permitrootlogin | awk '{print $2}'")}
-• PasswordAuthentication: {run_command("sshd -T 2>/dev/null | grep passwordauthentication | awk '{print $2}'")}
-• MaxAuthTries: {run_command("sshd -T 2>/dev/null | grep maxauthtries | awk '{print $2}'")}
-
-🎯 *优化配置检查:*
-• 性能配置: {'✅ 已部署' if run_command("[ -f /etc/ssh/sshd_config.d/performance.conf ] && echo 'yes'") == 'yes' else '❌ 未部署'}
-• UseDNS: {run_command("sshd -T 2>/dev/null | grep usedns | awk '{print $2}'")}
-• Compression: {run_command("sshd -T 2>/dev/null | grep compression | awk '{print $2}'")}"""
-
-    await thinking_msg.edit_text(diagnostic_info, parse_mode='Markdown')
+    await reply_or_edit(update, diagnostic_info, parse_mode='Markdown')
     logger.info("SSH diagnose command executed")
 
 async def ssh_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -758,11 +827,11 @@ async def ssh_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 检查是否有历史性能数据
-    history_data = run_command("ls -la /Users/liulu/Server-Admin/logs/monitoring/ssh-results-*.json 2>/dev/null | head -5")
+    history_data = run_command("ls -la " + find_log_dir() + "/ssh-results-*.json 2>/dev/null | head -5")
 
     if "ssh-results" in history_data:
         # 获取最新的性能数据文件
-        latest_file = run_command("ls -t /Users/liulu/Server-Admin/logs/monitoring/ssh-results-*.json 2>/dev/null | head -1")
+        latest_file = run_command("ls -t " + find_log_dir() + "/ssh-results-*.json 2>/dev/null | head -1")
         file_content = run_command(f"cat {latest_file} 2>/dev/null | head -40")
 
         history_msg = f"""📊 *SSH性能历史数据*
@@ -858,10 +927,10 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("💊 正在运行系统健康检查...")
+    thinking_msg = await send_thinking(update, "💊 正在运行系统健康检查...")
 
     # 运行健康检查脚本（如果存在）
-    health_result = run_command("/Users/liulu/Server-Admin/scripts/health-check.sh 2>&1 | tail -30")
+    health_result = run_command(find_script("health-check.sh") + " 2>&1 | tail -30")
 
     if "健康检查开始" in health_result:
         result_msg = f"""💊 *系统健康检查报告*
@@ -885,10 +954,7 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💡 *建议:* 确保 health-check.sh 脚本存在并具有执行权限"""
 
-    if update.message:
-        await update.message.reply_text(result_msg, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(result_msg, parse_mode='Markdown')
+    await reply_or_edit(update, result_msg, parse_mode='Markdown')
     logger.info("Health check command executed")
 
 async def network_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -896,37 +962,38 @@ async def network_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("🌐 正在诊断网络连接...")
+    thinking_msg = await send_thinking(update, "🌐 正在诊断网络连接...")
 
-    # 收集网络诊断信息
-    network_info = f"""🌐 *网络诊断报告*
+    _iface = run_command("ip addr show | head -20")
+    _loopback = run_command("ping -c 1 127.0.0.1 2>&1 | grep 'packet loss' || echo '测试失败'")
+    _gateway = run_command("ip route show default | head -1 || echo '无默认路由'")
+    _dns = run_command("nslookup google.com 2>&1 | head -2 || echo 'DNS测试失败'")
+    _tcp = run_command("ss -tan | grep ESTAB | wc -l")
+    _listen = run_command("ss -tln | grep LISTEN | wc -l")
+    _timewait = run_command("ss -tan | grep TIME-WAIT | wc -l")
+    _closewait = run_command("ss -tan | grep CLOSE-WAIT | wc -l")
+    
+    network_info = (
+        f"🌐 *网络诊断报告*\n\n"
+        f"📊 *网络接口信息:*\n```\n{_iface}\n```\n\n"
+        f"📡 *网络连通性测试:*\n"
+        f"• 本地回环: {_loopback}\n"
+        f"• 网关连通性: {_gateway}\n"
+        f"• DNS解析测试: {_dns}\n\n"
+        f"🔗 *网络连接状态:*\n"
+        f"• 活动TCP连接: {_tcp} 个\n"
+        f"• 监听端口: {_listen} 个\n\n"
+        f"🚨 *网络问题检查:*\n"
+        f"• TIME-WAIT: {_timewait} 个\n"
+        f"• CLOSE-WAIT: {_closewait} 个\n\n"
+        f"🎯 *建议操作:*\n"
+        f"1. 检查网络配置\n"
+        f"2. 验证防火墙规则\n"
+        f"3. 测试外部连通性\n"
+        f"4. 监控网络流量"
+    )
 
-📊 *网络接口信息:*
-{run_command("ip addr show 2>/dev/null | head -20 || ifconfig 2>/dev/null | head -20 || echo '无法获取网络接口信息'")}
-
-📡 *网络连通性测试:*
-• 本地回环: {run_command("ping -c 1 127.0.0.1 2>&1 | grep 'packet loss' || echo '测试失败'")}
-• 网关连通性: {run_command("ip route show default 2>/dev/null | head -1 || echo '无默认路由'")}
-• DNS解析测试: {run_command("nslookup google.com 2>&1 | head -2 || echo 'DNS测试失败'")}
-
-🔗 *网络连接状态:*
-• 活动TCP连接: {run_command("ss -tan 2>/dev/null | grep ESTAB | wc -l")} 个
-• 监听端口: {run_command("ss -tln 2>/dev/null | grep LISTEN | wc -l")} 个
-
-🚨 *网络问题检查:*
-• 高延迟连接: {run_command("ss -tan 2>/dev/null | grep TIME-WAIT | wc -l")} 个 TIME-WAIT
-• 关闭等待: {run_command("ss -tan 2>/dev/null | grep CLOSE-WAIT | wc -l")} 个 CLOSE-WAIT
-
-🎯 *建议操作:*
-1. 检查网络配置
-2. 验证防火墙规则
-3. 测试外部连通性
-4. 监控网络流量"""
-
-    if update.message:
-        await update.message.reply_text(network_info, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(network_info, parse_mode='Markdown')
+    await reply_or_edit(update, network_info, parse_mode='Markdown')
     logger.info("Network diagnose command executed")
 
 async def performance_diagnose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -934,37 +1001,38 @@ async def performance_diagnose(update: Update, context: ContextTypes.DEFAULT_TYP
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("📊 正在诊断系统性能...")
+    thinking_msg = await send_thinking(update, "📊 正在诊断系统性能...")
 
-    # 收集性能诊断信息
-    performance_info = f"""📊 *系统性能诊断报告*
+    _nproc = run_command("nproc 2>/dev/null || echo 'N/A'")
+    _loadavg = run_command("cat /proc/loadavg 2>/dev/null || echo 'N/A'")
+    _cpu = run_command("top -bn1 | grep 'Cpu(s)' 2>/dev/null || echo 'N/A'")
+    _mem = run_command("free -m 2>/dev/null || echo '内存信息不可用'")
+    _disk = run_command("df -h / 2>/dev/null | tail -1 || echo 'N/A'")
+    _inode = run_command("df -i / 2>/dev/null | tail -1 || echo 'N/A'")
+    _dcount = run_command("docker ps -q 2>/dev/null | wc -l")
+    _dstats = run_command("docker stats --no-stream 2>/dev/null | head -5 || echo 'Docker未运行'")
+    
+    performance_info = (
+        f"📊 *系统性能诊断报告*\n\n"
+        f"⚡ *CPU和负载:*\n"
+        f"• CPU核心数: {_nproc}\n"
+        f"• 系统负载: {_loadavg}\n"
+        f"• CPU使用率: {_cpu}\n\n"
+        f"💾 *内存使用:*\n```\n{_mem}\n```\n\n"
+        f"💿 *磁盘IO:*\n"
+        f"• 磁盘使用率: {_disk}\n"
+        f"• Inode使用: {_inode}\n\n"
+        f"🐳 *容器性能:*\n"
+        f"• 运行中容器: {_dcount} 个\n"
+        f"• 容器资源使用:\n```\n{_dstats}\n```\n\n"
+        f"📈 *性能建议:*\n"
+        f"1. 监控系统负载趋势\n"
+        f"2. 检查内存泄漏\n"
+        f"3. 优化磁盘IO\n"
+        f"4. 调整容器资源限制"
+    )
 
-⚡ *CPU和负载:*
-• CPU核心数: {run_command("nproc 2>/dev/null || echo 'N/A'")}
-• 系统负载: {run_command("cat /proc/loadavg 2>/dev/null || uptime 2>/dev/null || echo 'N/A'")}
-• CPU使用率: {run_command("top -bn1 2>/dev/null | grep 'Cpu(s)' || echo 'N/A'")}
-
-💾 *内存使用:*
-{run_command("free -m 2>/dev/null || echo '内存信息不可用'")}
-
-💿 *磁盘IO:*
-• 磁盘使用率: {run_command("df -h / 2>/dev/null | tail -1 || echo 'N/A'")}
-• Inode使用: {run_command("df -i / 2>/dev/null | tail -1 || echo 'N/A'")}
-
-🐳 *容器性能:*
-• 运行中容器: {run_command("docker ps -q 2>/dev/null | wc -l")} 个
-• 容器资源使用: {run_command("docker stats --no-stream 2>/dev/null | head -5 || echo 'Docker未运行'")}
-
-📈 *性能建议:*
-1. 监控系统负载趋势
-2. 检查内存泄漏
-3. 优化磁盘IO
-4. 调整容器资源限制"""
-
-    if update.message:
-        await update.message.reply_text(performance_info, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(performance_info, parse_mode='Markdown')
+    await reply_or_edit(update, performance_info, parse_mode='Markdown')
     logger.info("Performance diagnose command executed")
 
 async def security_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -972,35 +1040,39 @@ async def security_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("🔒 正在扫描系统安全...")
+    thinking_msg = await send_thinking(update, "🔒 正在扫描系统安全...")
 
     # 收集安全扫描信息
-    security_info = f"""🔒 *系统安全扫描报告*
+    _ssh_active = run_command("systemctl is-active ssh 2>/dev/null || echo '未知'")
+    _f2b_status = run_command("fail2ban-client ping 2>&1 | grep -q 'pong' && echo '运行中' || echo '未运行'")
+    _ufw_status = run_command("ufw status 2>/dev/null | head -1 || echo '防火墙未启用'")
+    _permit_root = run_command("sshd -T 2>/dev/null | grep permitrootlogin | awk '{print $2}' 2>/dev/null || echo 'N/A'")
+    _pwd_auth = run_command("sshd -T 2>/dev/null | grep passwordauthentication | awk '{print $2}' 2>/dev/null || echo 'N/A'")
+    _max_auth = run_command("sshd -T 2>/dev/null | grep maxauthtries | awk '{print $2}' 2>/dev/null || echo 'N/A'")
+    _ssh_fails = run_command("journalctl -u ssh --since '1 hour ago' 2>/dev/null | grep -cE 'Failed|Invalid' 2>/dev/null || echo '0'")
+    _f2b_banned = run_command("fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $4}' 2>/dev/null || echo '0'")
+    
+    security_info = (
+        f"🔒 *系统安全扫描报告*\n\n"
+        f"🛡️ *基本安全检查:*\n"
+        f"• SSH服务状态: {_ssh_active}\n"
+        f"• Fail2ban状态: {_f2b_status}\n"
+        f"• 防火墙状态: {_ufw_status}\n\n"
+        f"🔐 *SSH安全配置:*\n"
+        f"• PermitRootLogin: {_permit_root}\n"
+        f"• PasswordAuthentication: {_pwd_auth}\n"
+        f"• MaxAuthTries: {_max_auth}\n\n"
+        f"📊 *安全监控:*\n"
+        f"• 最近SSH失败尝试: {_ssh_fails} 次/小时\n"
+        f"• Fail2ban封禁IP: {_f2b_banned} 个\n\n"
+        f"🚨 *建议改进:*\n"
+        f"1. 定期更新系统\n"
+        f"2. 监控异常登录\n"
+        f"3. 强化SSH配置\n"
+        f"4. 启用审计日志"
+    )
 
-🛡️ *基本安全检查:*
-• SSH服务状态: {run_command("systemctl is-active ssh 2>/dev/null || echo '未知'")}
-• Fail2ban状态: {run_command("fail2ban-client ping 2>&1 | grep -q 'pong' && echo '运行中' || echo '未运行'")}
-• 防火墙状态: {run_command("ufw status 2>/dev/null | head -1 || echo '防火墙未启用'")}
-
-🔐 *SSH安全配置:*
-• PermitRootLogin: {run_command("sshd -T 2>/dev/null | grep permitrootlogin | awk '{print $2}' 2>/dev/null || echo 'N/A'")}
-• PasswordAuthentication: {run_command("sshd -T 2>/dev/null | grep passwordauthentication | awk '{print $2}' 2>/dev/null || echo 'N/A'")}
-• MaxAuthTries: {run_command("sshd -T 2>/dev/null | grep maxauthtries | awk '{print $2}' 2>/dev/null || echo 'N/A'")}
-
-📊 *安全监控:*
-• 最近SSH失败尝试: {run_command("journalctl -u ssh --since '1 hour ago' 2>/dev/null | grep -c 'Failed\\|Invalid' 2>/dev/null || echo '0'")} 次/小时
-• Fail2ban封禁IP: {run_command("fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' | awk '{print $4}' 2>/dev/null || echo '0'")} 个
-
-🚨 *建议改进:*
-1. 定期更新系统
-2. 监控异常登录
-3. 强化SSH配置
-4. 启用审计日志"""
-
-    if update.message:
-        await update.message.reply_text(security_info, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(security_info, parse_mode='Markdown')
+    await reply_or_edit(update, security_info, parse_mode='Markdown')
     logger.info("Security scan command executed")
 
 async def system_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1008,41 +1080,45 @@ async def system_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
 
-    thinking_msg = await update.message.reply_text("📈 正在收集系统监控数据...")
+    thinking_msg = await send_thinking(update, "📈 正在收集系统监控数据...")
 
-    # 收集系统监控信息
-    monitor_info = f"""📈 *系统监控面板*
+    _now = run_command("date")
+    _load = run_command("cat /proc/loadavg | awk '{print $1}'")
+    _mem = run_command("free -m | awk '/^Mem:/{printf \"%s/%sMB (%d%)\", $3, $2, $3*100/$2}'")
+    _disk = run_command("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
+    _conns = run_command("ss -tan | grep ESTAB | wc -l")
+    _ssh_conns = run_command("ss -tan | grep ':22' | grep ESTAB | wc -l")
+    _dockers = run_command("docker ps -q 2>/dev/null | wc -l")
+    _all_dockers = run_command("docker ps -aq 2>/dev/null | wc -l")
+    _ssh_svc = run_command("systemctl is-active ssh 2>/dev/null || echo '未知'")
+    _docker_svc = run_command("systemctl is-active docker 2>/dev/null || echo '未知'")
+    _f2b_svc = run_command("systemctl is-active fail2ban 2>/dev/null || echo '未知'")
+    
+    monitor_info = (
+        f"📈 *系统监控面板*\n\n"
+        f"🕐 *实时状态 (更新于: {_now})*\n\n"
+        f"⚡ *资源使用:*\n"
+        f"• 系统负载: {_load}\n"
+        f"• 内存使用: {_mem}\n"
+        f"• 磁盘使用: {_disk}\n\n"
+        f"🔗 *网络状态:*\n"
+        f"• 活动连接: {_conns} 个\n"
+        f"• SSH连接: {_ssh_conns} 个\n\n"
+        f"🐳 *容器状态:*\n"
+        f"• 运行中: {_dockers} 个\n"
+        f"• 总容器数: {_all_dockers} 个\n\n"
+        f"📊 *服务状态:*\n"
+        f"• SSH: {_ssh_svc}\n"
+        f"• Docker: {_docker_svc}\n"
+        f"• Fail2ban: {_f2b_svc}\n\n"
+        f"📋 *监控建议:*\n"
+        f"1. 设置告警阈值\n"
+        f"2. 定期性能基准测试\n"
+        f"3. 日志审计\n"
+        f"4. 容量规划"
+    )
 
-🕐 *实时状态 (更新于: {run_command("date")})*
-
-⚡ *资源使用:*
-• 系统负载: {run_command("cat /proc/loadavg 2>/dev/null | awk '{print $1}' || echo 'N/A'")}
-• 内存使用: {run_command("free -m 2>/dev/null | awk '/^Mem:/{print $3\"/\"$2\"MB (\"int($3*100/$2)\"%)'}' || echo 'N/A'")}
-• 磁盘使用: {run_command("df -h / 2>/dev/null | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}' || echo 'N/A'")}
-
-🔗 *网络状态:*
-• 活动连接: {run_command("ss -tan 2>/dev/null | grep ESTAB | wc -l")} 个
-• 入站流量: {run_command("ss -tan 2>/dev/null | grep ':22' | grep ESTAB | wc -l")} 个SSH连接
-
-🐳 *容器状态:*
-• 运行中: {run_command("docker ps -q 2>/dev/null | wc -l")} 个容器
-• 总容器数: {run_command("docker ps -aq 2>/dev/null | wc -l")} 个
-
-📊 *服务状态:*
-• SSH: {run_command("systemctl is-active ssh 2>/dev/null || echo '未知'")}
-• Docker: {run_command("systemctl is-active docker 2>/dev/null || echo '未知'")}
-• Fail2ban: {run_command("systemctl is-active fail2ban 2>/dev/null || echo '未知'")}
-
-📋 *监控建议:*
-1. 设置告警阈值
-2. 定期性能基准测试
-3. 日志审计
-4. 容量规划"""
-
-    if update.message:
-        await update.message.reply_text(monitor_info, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(monitor_info, parse_mode='Markdown')
+    await reply_or_edit(update, monitor_info, parse_mode='Markdown')
     logger.info("System monitor command executed")
 
 # ==================== 按钮回调 ====================
@@ -1065,7 +1141,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("⚡ SSH性能", callback_data="ssh_perf")],
             [InlineKeyboardButton("🤖 AI助手", callback_data="ai_menu"),
              InlineKeyboardButton("🔍 系统诊断", callback_data="diagnose_menu"),
-             InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")]
+             InlineKeyboardButton("🎉 趣味", callback_data="fun_menu")],
+        [InlineKeyboardButton("❓ 帮助", callback_data="help")]
         ]
         welcome = """🤖 *Server-Admin Bot v3.0*
 
@@ -1127,33 +1204,83 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await services(update, context)
 
     elif data == "restart_service_menu":
+        services_for_restart = ["ssh", "docker", "fail2ban", "tailscaled"]
+        keyboard = []
+        for svc in services_for_restart:
+            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
+            emoji = "🟢" if status.strip() == "active" else "🔴"
+            keyboard.append([InlineKeyboardButton(f"{emoji} 重启 {svc}", callback_data=f"svc_restart_{svc}")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "🔄 *服务重启管理*\n\n此功能正在开发中。\n\n当前可通过以下方式重启服务：\n• SSH登录服务器执行命令\n• 使用系统命令控制面板\n• 联系系统管理员",
-            parse_mode='Markdown'
+            "🔄 *服务重启管理*\n\n选择要重启的系统服务:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "start_service_menu":
+        services_for_start = ["ssh", "docker", "fail2ban", "tailscaled"]
+        keyboard = []
+        for svc in services_for_start:
+            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
+            if status.strip() != "active":
+                keyboard.append([InlineKeyboardButton(f"▶️ 启动 {svc}", callback_data=f"svc_start_{svc}")])
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton("✅ 所有服务已运行", callback_data="noop")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "▶️ *服务启动管理*\n\n此功能正在开发中。\n\n当前可通过以下方式启动服务：\n• SSH登录服务器执行命令\n• 使用系统命令控制面板\n• 联系系统管理员",
-            parse_mode='Markdown'
+            "▶️ *服务启动管理*\n\n选择要启动的系统服务:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "stop_service_menu":
+        services_for_stop = ["docker", "fail2ban"]
+        keyboard = []
+        for svc in services_for_stop:
+            status = run_command(f"systemctl is-active {svc} 2>/dev/null || echo '未知'")
+            if status.strip() == "active":
+                keyboard.append([InlineKeyboardButton(f"⏹️ 停止 {svc}", callback_data=f"svc_stop_{svc}")])
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton("✅ 无可停止服务", callback_data="noop")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="services_menu")])
         await query.edit_message_text(
-            "⏹️ *服务停止管理*\n\n此功能正在开发中。\n\n当前可通过以下方式停止服务：\n• SSH登录服务器执行命令\n• 使用系统命令控制面板\n• 联系系统管理员",
-            parse_mode='Markdown'
+            "⏹️ *服务停止管理*\n\n⚠️ 谨慎操作！选择要停止的系统服务:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "service_status_menu":
+        status_detail = run_command("""
+            echo "=== 系统服务详情 ==="
+            for svc in ssh docker fail2ban tailscaled cron rsyslog; do
+                active=$(systemctl is-active $svc 2>/dev/null || echo '未知')
+                enabled=$(systemctl is-enabled $svc 2>/dev/null || echo '未知')
+                uptime=$(systemctl show -p ActiveEnterTimestamp --value $svc 2>/dev/null || echo 'N/A')
+                echo "$svc: $active (开机自启: $enabled, 启动时间: $uptime)"
+            done
+        """)
         await query.edit_message_text(
-            "📊 *服务状态详情*\n\n此功能正在开发中。\n\n当前可通过以下方式查看服务状态：\n• 使用 /services 命令\n• SSH登录服务器执行命令\n• 查看系统监控面板",
-            parse_mode='Markdown'
+            f"📊 *服务状态详情*\n\n```\n{status_detail}\n```\n\n使用 /services 查看快速概览",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("services_menu")
         )
 
     elif data == "service_config":
+        config_info = run_command("""
+            echo "=== SSH 配置 ==="
+            echo "主配置: /etc/ssh/sshd_config"
+            ls -la /etc/ssh/sshd_config.d/ 2>/dev/null | head -5 || echo "无配置片段"
+            echo ""
+            echo "=== Docker 配置 ==="
+            echo "daemon.json: $(cat /etc/docker/daemon.json 2>/dev/null || echo '不存在')"
+            echo ""
+            echo "=== Fail2ban 配置 ==="
+            ls /etc/fail2ban/jail.d/ 2>/dev/null || echo "无自定义配置"
+        """)
         await query.edit_message_text(
-            "🔧 *服务配置管理*\n\n此功能正在开发中。\n\n当前可通过以下方式管理服务配置：\n• SSH登录服务器编辑配置文件\n• 使用配置管理工具\n• 联系系统管理员",
-            parse_mode='Markdown'
+            f"🔧 *服务配置概览*\n\n```\n{config_info}\n```",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("services_menu")
         )
 
     elif data == "logs":
@@ -1184,34 +1311,62 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         backup_list = run_command("ls -la /var/backups/ 2>/dev/null | head -20 || echo '备份目录不存在'")
         await query.edit_message_text(
             f"📋 *备份文件列表*\n\n```\n{backup_list}\n```",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=make_back_button("backup_menu")
         )
 
     elif data == "restore_backup_menu":
+        backups = run_command("ls -lt /var/backups/daily/*.gpg 2>/dev/null | head -5 || echo '无加密备份'\nls -lt /var/backups/daily/*.tar.gz 2>/dev/null | head -5 || echo '无普通备份'")
+        keyboard = []
+        for line in backups.strip().split('\n'):
+            if '.gpg' in line or '.tar.gz' in line:
+                fname = line.split()[-1] if line.split() else ''
+                bname = fname.split('/')[-1] if fname else ''
+                if bname:
+                    keyboard.append([InlineKeyboardButton(f"📦 {bname[:30]}", callback_data=f"noop")])
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton("📦 无可用备份", callback_data="noop")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="backup_menu")])
         await query.edit_message_text(
-            "↩️ *备份恢复管理*\n\n此功能正在开发中。\n\n当前可通过以下方式恢复备份：\n• SSH登录服务器执行恢复脚本\n• 手动解压备份文件\n• 联系系统管理员",
-            parse_mode='Markdown'
+            f"↩️ *备份恢复*\n\n⚠️ 恢复操作需通过 SSH 手动执行\n\n可用备份:\n```\n{backups}\n```\n\n💡 解密命令:\n`openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/monitoring/backup.key -in 备份文件 -out - | tar -xzf -`",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "clean_backup":
+        backup_info = run_command("""
+            echo "=== 每日备份 ==="
+            ls -lh /var/backups/daily/ 2>/dev/null | tail -n +2 || echo "目录为空"
+            echo ""
+            echo "=== 磁盘使用 ==="
+            du -sh /var/backups/ 2>/dev/null || echo "无法计算"
+        """)
+        keyboard = [
+            [InlineKeyboardButton("🗑️ 清理7天前备份", callback_data="clean_backup_7"),
+             InlineKeyboardButton("🗑️ 清理30天前备份", callback_data="clean_backup_30")],
+            [InlineKeyboardButton("🔙 返回", callback_data="backup_menu")]
+        ]
         await query.edit_message_text(
-            "🗑️ *备份清理*\n\n此功能正在开发中。\n\n当前可通过以下方式清理备份：\n• SSH登录服务器手动删除旧备份\n• 设置自动清理策略\n• 联系系统管理员",
-            parse_mode='Markdown'
+            f"🗑️ *备份清理*\n\n当前备份状况:\n```\n{backup_info}\n```\n\n⚠️ 清理操作不可恢复！",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif data == "backup_status":
         # 显示备份状态
-        backup_status = run_command("/Users/liulu/Server-Admin/scripts/backup.sh -s 2>&1 || echo '无法获取备份状态'")
+        backup_status = run_command(find_script("backup.sh") + " -s 2>&1 || echo '无法获取备份状态'")
         await query.edit_message_text(
             f"📊 *备份状态*\n\n```\n{backup_status}\n```",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=make_back_button("backup_menu")
         )
 
     elif data == "backup_config":
         backup_config = run_command("cat /etc/monitoring/backup.conf 2>/dev/null || echo '备份配置文件不存在'")
         await query.edit_message_text(
             f"🔧 *备份配置*\n\n```\n{backup_config}\n```",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=make_back_button("backup_menu")
         )
 
     elif data == "restart_menu":
@@ -1220,7 +1375,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "fun_menu":
         # 显示趣味功能子菜单
         fun_keyboard = [
-            [InlineKeyboardButton("❓ 帮助文档", callback_data="help"),
+            [InlineKeyboardButton("🎲 随机惊喜", callback_data="egg_random"),
              InlineKeyboardButton("🎮 趣味游戏", callback_data="egg_game")],
             [InlineKeyboardButton("😄 程序笑话", callback_data="egg_joke"),
              InlineKeyboardButton("🎭 技术诗歌", callback_data="egg_poetry")],
@@ -1256,10 +1411,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "ai_diagnose":
-        await query.edit_message_text(
-            "📊 *AI系统诊断*\n\n此功能正在开发中。\n\n当前可通过以下方式诊断系统：\n• 使用 /analyze 命令进行AI分析\n• 使用 /health_check 命令进行健康检查\n• 使用系统诊断子菜单",
-            parse_mode='Markdown'
-        )
+        await ai_analyze(update, context)
 
     elif data == "ai_config":
         ai_config_info = f"""📝 *AI配置信息*
@@ -1274,18 +1426,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔧 *配置位置*: {CONFIG_FILE}
 💡 *使用说明*: 编辑配置文件以更改AI设置"""
-        await query.edit_message_text(ai_config_info, parse_mode='Markdown')
+        await query.edit_message_text(ai_config_info, parse_mode='Markdown', reply_markup=make_back_button("ai_menu"))
 
     elif data == "ai_performance":
-        await query.edit_message_text(
-            "⚡ *AI性能监控*\n\n此功能正在开发中。\n\n当前AI性能：\n• 响应时间: 通常在2-5秒内\n• 可用性: 依赖网络连接\n• 准确性: 基于训练数据和提示词质量\n\n💡 *优化建议*:\n• 确保网络连接稳定\n• 使用清晰的提示词\n• 分段处理复杂问题",
-            parse_mode='Markdown'
-        )
+        import time
+        start = time.time()
+        test_result = call_ai("回复OK", "回复一个字") if AI_API_KEY else "AI未配置"
+        latency = round(time.time() - start, 2)
+        perf_msg = f"""⚡ *AI性能监控*
+
+🧠 *模型*: {AI_MODEL}
+🌐 *端点*: {AI_BASE_URL}
+
+📊 *性能测试*:
+• 响应时间: {latency}s
+• API状态: {'✅ 可用' if test_result and '错误' not in str(test_result) else '❌ 不可用'}
+• API Key: {'✅ 已配置' if AI_API_KEY else '❌ 未配置'}
+
+💡 *优化建议*:
+• 响应 >5s: 检查网络连接
+• API错误: 验证API Key有效性
+• 超时: 尝试切换模型"""
+        await query.edit_message_text(perf_msg, parse_mode='Markdown', reply_markup=make_back_button("ai_menu"))
 
     elif data == "ai_chat":
         await query.edit_message_text(
             "🤖 *AI 对话模式*\n\n直接发送消息即可与 AI 对话。\n\n例如：\n• 如何优化服务器内存？\n• Nginx 配置怎么写？\n• 帮我分析最近的错误日志",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=make_back_button("ai_menu")
         )
 
     elif data == "ai_analyze":
@@ -1330,21 +1498,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "ssh_response":
         # 运行SSH响应时间测试
-        thinking_msg = await query.message.reply_text("⏱ 正在测试SSH响应时间...")
-        result = run_command("/Users/liulu/Server-Admin/scripts/ssh-benchmark.sh --test=response --iterations=10")
-        await thinking_msg.edit_text(f"⏱ *SSH响应时间测试*\n\n{result}", parse_mode='Markdown')
+        thinking_msg = await send_thinking(update, "⏱ 正在测试SSH响应时间...")
+        result = run_command(find_script("ssh-benchmark.sh") + " --test=response --iterations=10")
+        await reply_or_edit(update, f"⏱ *SSH响应时间测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
 
     elif data == "ssh_transfer":
         # 运行SSH传输速度测试
-        thinking_msg = await query.message.reply_text("📁 正在测试SSH传输速度...")
-        result = run_command("/Users/liulu/Server-Admin/scripts/ssh-benchmark.sh --test=transfer --size=5MB")
-        await thinking_msg.edit_text(f"📁 *SSH传输速度测试*\n\n{result}", parse_mode='Markdown')
+        thinking_msg = await send_thinking(update, "📁 正在测试SSH传输速度...")
+        result = run_command(find_script("ssh-benchmark.sh") + " --test=transfer --size=5MB")
+        await reply_or_edit(update, f"📁 *SSH传输速度测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
 
     elif data == "ssh_concurrent":
         # 运行SSH并发连接测试
-        thinking_msg = await query.message.reply_text("👥 正在测试SSH并发连接...")
-        result = run_command("/Users/liulu/Server-Admin/scripts/ssh-benchmark.sh --test=concurrent --sessions=5")
-        await thinking_msg.edit_text(f"👥 *SSH并发连接测试*\n\n{result}", parse_mode='Markdown')
+        thinking_msg = await send_thinking(update, "👥 正在测试SSH并发连接...")
+        result = run_command(find_script("ssh-benchmark.sh") + " --test=concurrent --sessions=5")
+        await reply_or_edit(update, f"👥 *SSH并发连接测试*\n\n{escape_markdown(str(result))}", reply_markup=make_back_button("ssh_perf"), parse_mode='Markdown')
 
     elif data == "ssh_report":
         # 显示完整SSH性能报告
@@ -1381,6 +1549,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "ssh_history":
         # 显示SSH历史趋势
         await ssh_history(update, context)
+        # Note: ssh_history already uses reply_or_edit with make_back_button
 
     elif data == "ssh_config":
         # 显示SSH配置管理
@@ -1392,19 +1561,67 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "logs_health":
         logs_content = run_command("tail -50 /var/log/monitoring/health-check.log 2>/dev/null")
-        await query.edit_message_text(f"📋 *健康检查日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown')
+        await query.edit_message_text(f"📋 *健康检查日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_ssh":
         logs_content = run_command("journalctl -u ssh -n 20 --no-pager 2>/dev/null")
-        await query.edit_message_text(f"📋 *SSH日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown')
+        await query.edit_message_text(f"📋 *SSH日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_fail2ban":
         logs_content = run_command("tail -30 /var/log/fail2ban.log 2>/dev/null")
-        await query.edit_message_text(f"📋 *Fail2ban日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown')
+        await query.edit_message_text(f"📋 *Fail2ban日志*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
 
     elif data == "logs_docker":
         logs_content = run_command("docker ps -a --format 'table {{.Names}}\\t{{.Status}}' 2>/dev/null")
-        await query.edit_message_text(f"📋 *Docker状态*\n\n```\n{logs_content}\n```", parse_mode='Markdown')
+        await query.edit_message_text(f"📋 *Docker状态*\n\n```\n{logs_content}\n```", parse_mode='Markdown', reply_markup=make_back_button("logs"))
+
+
+    # ==================== 服务控制回调 ====================
+    elif data.startswith("svc_restart_"):
+        svc = data.replace("svc_restart_", "")
+        result = run_command(f"systemctl restart {svc} 2>&1")
+        new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
+        emoji = "✅" if new_status.strip() == "active" else "❌"
+        await query.edit_message_text(
+            f"🔄 *服务重启结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("services_menu")
+        )
+
+    elif data.startswith("svc_start_"):
+        svc = data.replace("svc_start_", "")
+        result = run_command(f"systemctl start {svc} 2>&1")
+        new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
+        emoji = "✅" if new_status.strip() == "active" else "❌"
+        await query.edit_message_text(
+            f"▶️ *服务启动结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("services_menu")
+        )
+
+    elif data.startswith("svc_stop_"):
+        svc = data.replace("svc_stop_", "")
+        result = run_command(f"systemctl stop {svc} 2>&1")
+        new_status = run_command(f"systemctl is-active {svc} 2>/dev/null")
+        emoji = "🛑" if new_status.strip() != "active" else "❌"
+        await query.edit_message_text(
+            f"⏹️ *服务停止结果*\n\n{svc}: {emoji} {new_status}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("services_menu")
+        )
+
+    elif data.startswith("clean_backup_"):
+        days = data.replace("clean_backup_", "")
+        result = run_command(f"find /var/backups/daily/ -name '*.gpg' -mtime +{days} -delete 2>&1\nfind /var/backups/daily/ -name '*.tar.gz' -mtime +{days} -delete 2>&1")
+        remaining = run_command("ls /var/backups/daily/ 2>/dev/null | wc -l")
+        await query.edit_message_text(
+            f"🗑️ *备份清理完成*\n\n清理了 {days} 天前的备份\n剩余备份数: {remaining}\n\n```\n{result}\n```",
+            parse_mode='Markdown',
+            reply_markup=make_back_button("backup_menu")
+        )
+
+    elif data == "noop":
+        await query.answer("此操作暂不可用")
 
     # ==================== 彩蛋功能 ====================
     elif data == "easter_egg":
@@ -1424,6 +1641,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(easter_egg_keyboard)
         )
 
+    elif data == "egg_random":
+        import random
+        egg_map = {
+            "game": "egg_game", "joke": "egg_joke", "poetry": "egg_poetry",
+            "fortune": "egg_fortune", "meme": "egg_meme", "ai": "egg_ai"
+        }
+        random_egg = random.choice(list(egg_map.values()))
+        # Redirect by updating data and re-processing
+        # Simplest: just pick a random message directly
+        all_egg_messages = []
+        # Games
+        all_egg_messages.extend([
+            "🎮 *猜数字游戏*\n\n我正在想一个1-100之间的数字，猜猜看是多少？\n\n发送 `/guess 数字` 来猜测！",
+            "🎯 *服务器挑战*\n\n你能让服务器负载保持在1.0以下吗？\n使用 `/status` 查看当前负载！",
+        ])
+        # Jokes
+        all_egg_messages.extend([
+            "🤣 程序员总是把万圣节和圣诞节搞混，因为 Oct 31 == Dec 25！",
+            "😄 SSH连接对女朋友说：'我需要你的公钥才能进入你的心里！'",
+        ])
+        # Fortunes
+        all_egg_messages.extend([
+            "🔮 今天你会发现一个隐藏的Bug，但也会找到优雅的解决方案。",
+            "🌟 运维座今日运势：工作：适合优化配置 💰 财运：备份一切顺利",
+        ])
+        chosen = random.choice(all_egg_messages)
+        await query.edit_message_text(chosen, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
+
     elif data == "egg_game":
         # 简单的小游戏
         games = [
@@ -1433,7 +1678,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         import random
         game_msg = random.choice(games)
-        await query.edit_message_text(game_msg, parse_mode='Markdown')
+        await query.edit_message_text(game_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_joke":
         # 程序员笑话
@@ -1445,7 +1690,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         import random
         joke_msg = random.choice(jokes)
-        await query.edit_message_text(joke_msg, parse_mode='Markdown')
+        await query.edit_message_text(joke_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_poetry":
         # 诗歌模式
@@ -1468,7 +1713,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         import random
         fortune_msg = random.choice(fortunes)
-        await query.edit_message_text(fortune_msg, parse_mode='Markdown')
+        await query.edit_message_text(fortune_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_meme":
         # 表情包模式
@@ -1479,7 +1724,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         import random
         meme_msg = random.choice(memes)
-        await query.edit_message_text(meme_msg, parse_mode='Markdown')
+        await query.edit_message_text(meme_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
 
     elif data == "egg_ai":
         # AI彩蛋
@@ -1490,7 +1735,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         import random
         ai_msg = random.choice(ai_eggs)
-        await query.edit_message_text(ai_msg, parse_mode='Markdown')
+        await query.edit_message_text(ai_msg, parse_mode='Markdown', reply_markup=make_back_button("fun_menu"))
 
 # ==================== 主函数 ====================
 
