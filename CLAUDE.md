@@ -12,7 +12,8 @@ Server operations for Vultr Tokyo (149.28.25.78). Health checks, backups, Telegr
 - Bot restart: `systemctl restart telegram-bot`
 - Bot syntax check: `python3 -m py_compile /usr/local/sbin/monitoring/telegram-bot.py`
 
-## Architecture
+## Stack
+Bash, Python (python-telegram-bot), systemd, Docker, UFW
 - `scripts/telegram-bot.py` — Bot v4.0 (python-telegram-bot, CALLBACK_ROUTES, arun_command async, @safe_handler)
 - `scripts/health-check.sh` — System health v2.1
 - `scripts/backup.sh` — Encrypted backup
